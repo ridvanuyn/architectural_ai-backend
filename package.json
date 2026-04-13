@@ -10,7 +10,11 @@
     "lint": "eslint src/",
     "migrate": "node src/migrations/run.js",
     "migrate:seed": "node src/migrations/seed.js",
-    "migrate:rollback": "node src/migrations/rollback.js"
+    "migrate:rollback": "node src/migrations/rollback.js",
+    "pm2": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop architectural-ai-api",
+    "pm2:restart": "pm2 restart architectural-ai-api",
+    "pm2:logs": "pm2 logs architectural-ai-api"
   },
   "keywords": [
     "architectural-ai",
