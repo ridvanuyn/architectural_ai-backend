@@ -6,3 +6,8 @@ uploads
 .DS_Store
 *.md
 docs
+.git
+.gitignore
+coverage
+.idea
+.vscode
