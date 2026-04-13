@@ -1,0 +1,59 @@
+const mongoose = require('mongoose');
+
+const specialtyWorldSchema = new mongoose.Schema({
+  id: {
+    type: String,
+    required: true,
+    unique: true,
+  },
+  name: {
+    type: String,
+    required: true,
+  },
+  description: {
+    type: String,
+    required: true,
+  },
+  category: {
+    type: String,
+    enum: ['fantasy', 'historical', 'futuristic', 'cinematic', 'nature', 'luxury', 'animated', 'cultural', 'sci-fi', 'retro'],
+    required: true,
+  },
+  imageUrl: {
+    type: String,
+    required: true,
+  },
+  prompt: {
+    type: String,
+    required: true,
+  },
+  price: {
+    type: Number,
+    default: 0.99,
+  },
+  isProOnly: {
+    type: Boolean,
+    default: false, // If true, only available for pro users for free
+  },
+  isFeatured: {
+    type: Boolean,
+    default: false,
+  },
+  sortOrder: {
+    type: Number,
+    default: 0,
+  },
+  isActive: {
+    type: Boolean,
+    default: true,
+  },
+}, {
+  timestamps: true,
+});
+
+// Index for faster queries
+specialtyWorldSchema.index({ category: 1, sortOrder: 1 });
+specialtyWorldSchema.index({ isActive: 1, isFeatured: -1 });
+
+module.exports = mongoose.model('SpecialtyWorld', specialtyWorldSchema);
+
