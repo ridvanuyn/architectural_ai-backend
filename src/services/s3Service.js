@@ -32,8 +32,8 @@ const optimizeImage = async (buffer, options = {}) => {
     format = IMAGE_SETTINGS.OUTPUT_FORMAT,
   } = options;
 
-  let sharpInstance = sharp(buffer);
-  
+  let sharpInstance = sharp(buffer).rotate(); // Auto-rotate based on EXIF orientation
+
   // Get metadata
   const metadata = await sharpInstance.metadata();
   

@@ -14,7 +14,8 @@
     "pm2": "pm2 start ecosystem.config.js",
     "pm2:stop": "pm2 stop architectural-ai-api",
     "pm2:restart": "pm2 restart architectural-ai-api",
-    "pm2:logs": "pm2 logs architectural-ai-api"
+    "pm2:logs": "pm2 logs architectural-ai-api",
+    "es:sync": "node scripts/sync-elasticsearch.js"
   },
   "keywords": [
     "architectural-ai",
@@ -30,6 +31,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.574.0",
     "@aws-sdk/s3-request-presigner": "^3.574.0",
+    "@elastic/elasticsearch": "^9.3.4",
     "@fal-ai/client": "^1.9.5",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
@@ -49,7 +51,7 @@
   "devDependencies": {
     "nodemon": "^3.1.11"
   },
-"engines": {
+  "engines": {
     "node": ">=20.0.0"
   }
 }

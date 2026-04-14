@@ -54,6 +54,7 @@ const specialtyWorldSchema = new mongoose.Schema({
 // Index for faster queries
 specialtyWorldSchema.index({ category: 1, sortOrder: 1 });
 specialtyWorldSchema.index({ isActive: 1, isFeatured: -1 });
+specialtyWorldSchema.index({ name: 'text', description: 'text', id: 'text' });
 
 module.exports = mongoose.model('SpecialtyWorld', specialtyWorldSchema);
 
