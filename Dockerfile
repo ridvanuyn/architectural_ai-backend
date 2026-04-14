@@ -9,7 +9,6 @@ COPY package*.json ./
 RUN npm ci --only=production
 
 COPY src/ ./src/
-COPY scripts/ ./scripts/
 
 RUN mkdir -p uploads
 

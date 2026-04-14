@@ -1,5 +1,4 @@
 const SpecialtyWorld = require('../models/SpecialtyWorld');
-const es = require('../services/elasticsearchService');
 
 // @desc    Get all specialty worlds
 // @route   GET /api/worlds
@@ -90,7 +89,7 @@ exports.getWorldsByCategory = async (req, res, next) => {
   }
 };
 
-// @desc    Search worlds with pagination (Elasticsearch-first, MongoDB fallback)
+// @desc    Search worlds with pagination
 // @route   GET /api/worlds/search
 // @access  Public
 exports.searchWorlds = async (req, res, next) => {
@@ -98,33 +97,8 @@ exports.searchWorlds = async (req, res, next) => {
     const { q = '', page = 1, limit = 20, category } = req.query;
     const pageNum = Math.max(1, parseInt(page));
     const limitNum = Math.min(50, Math.max(1, parseInt(limit)));
-
-    // Try Elasticsearch first
-    if (es.isReady()) {
-      try {
-        const result = await es.search({
-          query: q,
-          page: pageNum,
-          limit: limitNum,
-          category: category || null,
-        });
-
-        return res.status(200).json({
-          success: true,
-          count: result.hits.length,
-          total: result.total,
-          page: pageNum,
-          totalPages: Math.ceil(result.total / limitNum),
-          data: result.hits,
-          engine: 'elasticsearch',
-        });
-      } catch (esErr) {
-        console.warn('ES search failed, falling back to MongoDB:', esErr.message);
-      }
-    }
-
-    // MongoDB fallback
     const skip = (pageNum - 1) * limitNum;
+
     const query = { isActive: true };
 
     if (q.trim()) {
@@ -158,7 +132,6 @@ exports.searchWorlds = async (req, res, next) => {
       page: pageNum,
       totalPages: Math.ceil(total / limitNum),
       data: worlds,
-      engine: 'mongodb',
     });
   } catch (error) {
     next(error);

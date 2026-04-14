@@ -10,8 +10,6 @@ services:
     environment:
       - NODE_ENV=production
       - NODE_OPTIONS=--max-old-space-size=256
-      # Set ELASTICSEARCH_URL here only when running with --profile search
-      - ELASTICSEARCH_URL=${ELASTICSEARCH_URL:-}
     deploy:
       resources:
         limits:
@@ -24,47 +22,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-
-  # Elasticsearch is OPTIONAL. Default `docker compose up -d` will NOT start it.
-  # Start with search enabled: `docker compose --profile search up -d`
-  # Requires ~1.5-2GB free RAM and vm.max_map_count=262144.
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
-    container_name: architectural-ai-elasticsearch
-    restart: unless-stopped
-    profiles: ["search"]
-    environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - xpack.security.enrollment.enabled=false
-      - ES_JAVA_OPTS=-Xms512m -Xmx512m
-      - cluster.name=architectural-ai
-      - bootstrap.memory_lock=false
-      - action.destructive_requires_name=true
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
-    ports:
-      - "9200:9200"
-    volumes:
-      - es_data:/usr/share/elasticsearch/data
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-        reservations:
-          memory: 512M
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s || exit 1"]
-      interval: 15s
-      timeout: 10s
-      retries: 20
-      start_period: 90s
-
-volumes:
-  es_data:
-    driver: local
