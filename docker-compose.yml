@@ -10,10 +10,8 @@ services:
     environment:
       - NODE_ENV=production
       - NODE_OPTIONS=--max-old-space-size=256
-      - ELASTICSEARCH_URL=http://elasticsearch:9200
-    depends_on:
-      elasticsearch:
-        condition: service_healthy
+      # Set ELASTICSEARCH_URL here only when running with --profile search
+      - ELASTICSEARCH_URL=${ELASTICSEARCH_URL:-}
     deploy:
       resources:
         limits:
@@ -27,10 +25,14 @@ services:
       retries: 3
       start_period: 10s
 
+  # Elasticsearch is OPTIONAL. Default `docker compose up -d` will NOT start it.
+  # Start with search enabled: `docker compose --profile search up -d`
+  # Requires ~1.5-2GB free RAM and vm.max_map_count=262144.
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
     container_name: architectural-ai-elasticsearch
     restart: unless-stopped
+    profiles: ["search"]
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
