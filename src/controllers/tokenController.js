@@ -246,6 +246,94 @@ exports.restorePurchases = async (req, res, next) => {
   }
 };
 
+// @desc    Grant tokens (e.g. monthly premium bonus)
+// @route   POST /api/tokens/grant
+// @access  Private
+exports.grantTokens = async (req, res, next) => {
+  try {
+    const { amount, reason } = req.body;
+    const grantAmount = parseInt(amount, 10);
+
+    if (!grantAmount || grantAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'A positive amount is required',
+      });
+    }
+
+    const user = await User.findById(req.user.id);
+    const balanceBefore = user.tokens.balance;
+    user.tokens.balance += grantAmount;
+    await user.save();
+
+    await Transaction.create({
+      user: user._id,
+      type: TRANSACTION_TYPES.BONUS,
+      tokens: {
+        amount: grantAmount,
+        balanceBefore,
+        balanceAfter: user.tokens.balance,
+      },
+      description: reason || 'Premium membership token grant',
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `${grantAmount} tokens granted`,
+      data: { tokens: user.tokens },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Refund tokens (used when design generation fails)
+// @route   POST /api/tokens/refund
+// @access  Private
+exports.refundTokens = async (req, res, next) => {
+  try {
+    const { designId, amount, reason } = req.body;
+    const refundAmount = parseInt(amount, 10);
+
+    if (!refundAmount || refundAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'A positive amount is required',
+      });
+    }
+
+    const user = await User.findById(req.user.id);
+    const balanceBefore = user.tokens.balance;
+    user.tokens.balance += refundAmount;
+    // Keep stats consistent — refunded usage shouldn't count as "used".
+    if (user.tokens.totalUsed >= refundAmount) {
+      user.tokens.totalUsed -= refundAmount;
+    }
+    await user.save();
+
+    await Transaction.create({
+      user: user._id,
+      type: TRANSACTION_TYPES.REFUND,
+      tokens: {
+        amount: refundAmount,
+        balanceBefore,
+        balanceAfter: user.tokens.balance,
+      },
+      design: designId || undefined,
+      status: 'refunded',
+      description: reason || 'Design generation failed — refund',
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `${refundAmount} tokens refunded`,
+      data: { tokens: user.tokens },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // @desc    Apply promo code
 // @route   POST /api/tokens/promo
 // @access  Private

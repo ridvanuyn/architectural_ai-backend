@@ -193,8 +193,9 @@ async function processDesignWithAI(designId, imageUrl, options) {
   const { style, roomType, customPrompt, tier, userId } = options;
 
   try {
-    console.log(`🚀 Processing design ${designId} | style: ${style} | tier: ${tier}${customPrompt ? ` | custom: "${customPrompt}"` : ''}`);
+    console.log(`🚀 [design:${designId}] Processing | style: ${style} | tier: ${tier}${customPrompt ? ` | custom: "${customPrompt}"` : ''}`);
 
+    console.log(`🧪 [design:${designId}] Calling falService.transformImage…`);
     const result = await falService.transformImage(imageUrl, {
       style,
       roomType,
@@ -206,30 +207,43 @@ async function processDesignWithAI(designId, imageUrl, options) {
       throw new Error('AI transformation returned no result');
     }
 
-    console.log(`🎨 AI generated image URL: ${result.url}`);
+    console.log(`🎨 [design:${designId}] AI generated image URL: ${result.url}`);
 
-    let finalUrl = result.url;
+    const rawFalUrl = result.url;
+    let finalUrl = rawFalUrl;
     let finalKey = null;
     let width = null;
     let height = null;
 
-    // Try to upload to S3, but continue if it fails
+    // Try to upload to S3, but continue if it fails — the fal.ai URL is
+    // temporary but still lets the frontend render the preview.
     try {
-      const s3Result = await s3Service.uploadFromUrl(result.url, {
+      console.log(`☁️ [design:${designId}] Uploading to S3…`);
+      const s3Result = await s3Service.uploadFromUrl(rawFalUrl, {
         folder: 'generated',
         userId,
       });
-      finalUrl = s3Result.url;
-      finalKey = s3Result.key;
-      width = s3Result.width;
-      height = s3Result.height;
-      console.log(`☁️ Uploaded to S3: ${s3Result.url}`);
+      // Only adopt the S3 URL if it's actually present — don't clobber a
+      // perfectly-good fal URL with undefined if s3Service ever regresses.
+      if (s3Result && s3Result.url) {
+        finalUrl = s3Result.url;
+        finalKey = s3Result.key;
+        width = s3Result.width;
+        height = s3Result.height;
+        console.log(`☁️ [design:${designId}] Uploaded to S3: ${s3Result.url}`);
+      } else {
+        console.warn(`⚠️ [design:${designId}] S3 returned no URL, falling back to fal.ai URL`);
+      }
     } catch (s3Error) {
-      console.warn(`⚠️ S3 upload failed, using fal.ai URL directly: ${s3Error.message}`);
-      // Continue with fal.ai's URL - it's temporary but works for now
+      // Full stack so we can diagnose sharp/content-type/fetch failures.
+      console.warn(
+        `⚠️ [design:${designId}] S3 upload failed, keeping fal.ai URL: ${s3Error.message}`
+      );
+      if (s3Error.stack) console.warn(s3Error.stack);
     }
 
     // Update design with generated image
+    console.log(`💾 [design:${designId}] Saving design record…`);
     const design = await Design.findById(designId);
     if (design) {
       design.generatedImage = {
@@ -237,6 +251,9 @@ async function processDesignWithAI(designId, imageUrl, options) {
         key: finalKey,
         width: width,
         height: height,
+        // Always preserve the raw fal.ai URL — callers may want it if the
+        // S3 URL becomes invalid or when we only got the fal URL.
+        fallbackUrl: rawFalUrl,
       };
       design.aiParams = {
         model: result.model,
@@ -246,10 +263,14 @@ async function processDesignWithAI(designId, imageUrl, options) {
       design.completeProcessing(finalUrl, finalKey);
       await design.save();
 
-      console.log(`✅ Design ${designId} completed successfully`);
+      console.log(`✅ [design:${designId}] completed successfully (final: ${finalUrl})`);
+    } else {
+      console.warn(`⚠️ [design:${designId}] not found when saving result`);
     }
   } catch (error) {
-    console.error(`❌ Design ${designId} processing failed:`, error.message);
+    // Log full stack so we see where fal/sharp/fetch actually threw.
+    console.error(`❌ [design:${designId}] processing failed:`, error.message);
+    if (error.stack) console.error(error.stack);
 
     // Update design as failed
     const design = await Design.findById(designId);

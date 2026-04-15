@@ -6,18 +6,34 @@ const SpecialtyWorld = require('../models/SpecialtyWorld');
 exports.getWorlds = async (req, res, next) => {
   try {
     const { category } = req.query;
-    
+
     const query = { isActive: true };
     if (category) {
       query.category = category;
     }
 
-    const worlds = await SpecialtyWorld.find(query)
-      .sort({ isFeatured: -1, sortOrder: 1, name: 1 });
+    // Optional pagination: if the caller passes page or limit, serve a paged
+    // response. Otherwise keep the legacy "return everything" behavior for
+    // backwards compatibility — but cap at a safe upper bound so a bloated
+    // catalog never blows up the response.
+    const hasPaging = req.query.page != null || req.query.limit != null;
+    const pageNum = Math.max(1, parseInt(req.query.page) || 1);
+    const limitNum = Math.min(500, Math.max(1, parseInt(req.query.limit) || (hasPaging ? 20 : 500)));
+    const skip = (pageNum - 1) * limitNum;
+
+    const sort = { isFeatured: -1, sortOrder: 1, createdAt: -1 };
+
+    const [worlds, total] = await Promise.all([
+      SpecialtyWorld.find(query).sort(sort).skip(skip).limit(limitNum).lean(),
+      SpecialtyWorld.countDocuments(query),
+    ]);
 
     res.status(200).json({
       success: true,
       count: worlds.length,
+      total,
+      page: pageNum,
+      totalPages: Math.max(1, Math.ceil(total / limitNum)),
       data: worlds,
     });
   } catch (error) {
@@ -30,7 +46,27 @@ exports.getWorlds = async (req, res, next) => {
 // @access  Public
 exports.getWorld = async (req, res, next) => {
   try {
-    const world = await SpecialtyWorld.findOne({ 
+    // Guard against route collisions: an older frontend (or a stale deploy
+    // where dedicated routes didn't exist) may call /worlds/search, etc.
+    // Return a 200 with an empty payload so the client doesn't crash; the
+    // explicit dedicated routes will be hit when the server is up to date.
+    const RESERVED_SEGMENTS = new Set([
+      'search',
+      'featured',
+      'categories',
+      'category',
+      'specialty',
+    ]);
+    if (RESERVED_SEGMENTS.has(req.params.id)) {
+      return res.status(200).json({
+        success: true,
+        data: [],
+        count: 0,
+        message: `Route /worlds/${req.params.id} is reserved; no world lookup performed.`,
+      });
+    }
+
+    const world = await SpecialtyWorld.findOne({
       id: req.params.id,
       isActive: true,
     });
@@ -118,7 +154,7 @@ exports.searchWorlds = async (req, res, next) => {
     const projection = { name: 1, id: 1, description: 1, category: 1, imageUrl: 1, prompt: 1, price: 1, isProOnly: 1, isFeatured: 1, createdAt: 1 };
     const [worlds, total] = await Promise.all([
       SpecialtyWorld.find(query, projection)
-        .sort({ isFeatured: -1, sortOrder: 1, name: 1 })
+        .sort({ isFeatured: -1, sortOrder: 1, createdAt: -1 })
         .skip(skip)
         .limit(limitNum)
         .lean(),

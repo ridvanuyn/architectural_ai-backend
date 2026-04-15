@@ -9,6 +9,8 @@ const {
   cancelSubscription,
   restorePurchases,
   applyPromoCode,
+  grantTokens,
+  refundTokens,
 } = require('../controllers/tokenController');
 
 // Public routes
@@ -23,6 +25,8 @@ router.post('/purchase', purchaseTokens);
 router.post('/subscription/cancel', cancelSubscription);
 router.post('/restore', restorePurchases);
 router.post('/promo', applyPromoCode);
+router.post('/grant', grantTokens);
+router.post('/refund', refundTokens);
 
 module.exports = router;
 

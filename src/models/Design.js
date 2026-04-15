@@ -23,6 +23,9 @@ const designSchema = new mongoose.Schema({
     key: { type: String },
     width: { type: Number },
     height: { type: Number },
+    // Preserved raw fal.ai URL used as a fallback when S3 upload fails so the
+    // frontend can still render the generated preview.
+    fallbackUrl: { type: String },
   },
 
   // Design details
