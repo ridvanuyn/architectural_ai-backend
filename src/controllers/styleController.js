@@ -1,28 +1,38 @@
 const Design = require('../models/Design');
 const { DESIGN_STYLES, ROOM_TYPES } = require('../config/constants');
+const cache = require('../services/cacheService');
+
+const STYLES_CACHE_KEY = 'styles:popularity:v1';
+const STYLES_CACHE_TTL = 300; // 5 minutes
+
+async function buildPopularityStyles() {
+  const usageStats = await Design.aggregate([
+    { $match: { isDeleted: false } },
+    { $group: { _id: '$style', count: { $sum: 1 } } },
+    { $sort: { count: -1 } },
+  ]);
+
+  const usageMap = {};
+  usageStats.forEach((s) => { usageMap[s._id] = s.count; });
+
+  const styles = DESIGN_STYLES.map((style) => ({
+    ...style,
+    usageCount: usageMap[style.id] || 0,
+  }));
+  styles.sort((a, b) => b.usageCount - a.usageCount);
+  return styles;
+}
 
 // @desc    Get all styles sorted by popularity (most used first)
 // @route   GET /api/styles
 // @access  Public
 exports.getStyles = async (req, res, next) => {
   try {
-    // Count usage per style from designs collection
-    const usageStats = await Design.aggregate([
-      { $match: { isDeleted: false } },
-      { $group: { _id: '$style', count: { $sum: 1 } } },
-      { $sort: { count: -1 } },
-    ]);
-
-    const usageMap = {};
-    usageStats.forEach(s => { usageMap[s._id] = s.count; });
-
-    // Enrich styles with usage count and sort by popularity
-    const styles = DESIGN_STYLES.map(style => ({
-      ...style,
-      usageCount: usageMap[style.id] || 0,
-    }));
-
-    styles.sort((a, b) => b.usageCount - a.usageCount);
+    const styles = await cache.remember(
+      STYLES_CACHE_KEY,
+      STYLES_CACHE_TTL,
+      buildPopularityStyles,
+    );
 
     res.status(200).json({
       success: true,
@@ -33,6 +43,9 @@ exports.getStyles = async (req, res, next) => {
     next(error);
   }
 };
+
+// Invalidate when a design is created/deleted so counts stay fresh.
+exports.invalidatePopularityCache = () => cache.del(STYLES_CACHE_KEY);
 
 // @desc    Get single style by ID
 // @route   GET /api/styles/:id

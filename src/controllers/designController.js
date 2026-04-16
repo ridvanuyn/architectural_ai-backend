@@ -7,6 +7,7 @@ const User = require('../models/User');
 const { DESIGN_STATUS, TOKENS_PER_DESIGN, DESIGN_STYLES } = require('../config/constants');
 const s3Service = require('../services/s3Service');
 const falService = require('../services/falService');
+const styleController = require('./styleController');
 
 // @desc    Upload image and get S3 URL
 // @route   POST /api/designs/upload
@@ -175,6 +176,9 @@ exports.createDesign = async (req, res, next) => {
       $inc: { 'stats.totalDesigns': 1 },
       'stats.lastDesignAt': new Date(),
     });
+
+    // A new design means popularity counts just shifted — drop the cache.
+    styleController.invalidatePopularityCache().catch(() => {});
 
     res.status(201).json({
       success: true,
@@ -408,6 +412,8 @@ exports.deleteDesign = async (req, res, next) => {
     // Soft delete
     design.isDeleted = true;
     await design.save();
+
+    styleController.invalidatePopularityCache().catch(() => {});
 
     res.status(200).json({
       success: true,
