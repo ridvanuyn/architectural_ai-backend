@@ -9,6 +9,7 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const sharp = require('sharp');
 const { v4: uuidv4 } = require('uuid');
 const { IMAGE_SETTINGS } = require('../config/constants');
+const { cdnUrl, rawS3Url } = require('../utils/cdnUrl');
 
 // S3 Client
 const s3Client = new S3Client({
@@ -20,6 +21,8 @@ const s3Client = new S3Client({
 });
 
 const BUCKET_NAME = process.env.AWS_S3_BUCKET;
+const THUMBNAIL_BUCKET = process.env.AWS_S3_BUCKET_THUMBNAILS || 'architectural-ai-thumbnails';
+const DEFAULT_SIGNED_URL_TTL = parseInt(process.env.SIGNED_URL_TTL_SECONDS, 10) || 120;
 
 /**
  * Görsel yüklemeden önce optimize et
@@ -76,10 +79,11 @@ const uploadImage = async (buffer, options = {}) => {
     filename,
     contentType = 'image/jpeg',
     optimize = true,
+    thumbnailId, // set → generateThumbnailVariants aynı buffer üzerinden tetiklenir
   } = options;
 
   let imageData = { buffer, size: buffer.length };
-  
+
   // Optimize image if requested
   if (optimize) {
     imageData = await optimizeImage(buffer);
@@ -105,32 +109,88 @@ const uploadImage = async (buffer, options = {}) => {
 
   await s3Client.send(command);
 
-  // Generate public URL
-  const url = `https://${BUCKET_NAME}.s3.${process.env.AWS_REGION || 'us-east-1'}.amazonaws.com/${key}`;
+  // url: CDN veya S3 (feature flag). rawS3Url: her zaman direkt S3 — signed
+  // URL üretimi, silme, migration script'leri gibi işlemler bunu kullanmalı.
+  const url = cdnUrl(key, { bucket: 'images' });
+  const raw = rawS3Url(key, 'images');
+
+  // Thumbnail varyantları — main upload başarılıysa fail-safe olarak üretilir.
+  // Hata olursa upload iptal edilmez, sadece thumbnail alanı boş kalır.
+  let thumbnails = null;
+  if (thumbnailId) {
+    try {
+      thumbnails = await generateThumbnailVariants(imageData.buffer, thumbnailId);
+    } catch (err) {
+      console.warn(`⚠️ [s3Service] thumbnail variants failed for ${thumbnailId}: ${err.message}`);
+    }
+  }
 
   return {
     url,
+    rawS3Url: raw,
     key,
     bucket: BUCKET_NAME,
     size: imageData.size,
     width: imageData.width,
     height: imageData.height,
     contentType,
+    thumbnails,
+    thumbnailUrl: thumbnails ? thumbnails.find((t) => t.size === 512)?.url : null,
   };
+};
+
+/**
+ * Tek buffer'dan birden fazla boyutta thumbnail üretip S3 thumbnail bucket'ına
+ * yükler. Pre-generated thumbnail stratejisi — Lambda@Edge veya on-the-fly
+ * resize yok. Anahtar şablonu: thumbnails/<id>/<size>.jpg
+ *
+ * @param {Buffer} buffer  orijinal görsel
+ * @param {string} id  hedef id (örn. design uuid veya world id)
+ * @param {{sizes?: number[], quality?: number}} opts
+ * @returns {Promise<{size:number, key:string, url:string, bytes:number}[]>}
+ */
+const generateThumbnailVariants = async (buffer, id, opts = {}) => {
+  const { sizes = [256, 512, 1024], quality = 82 } = opts;
+
+  const uploads = sizes.map(async (size) => {
+    const resized = await sharp(buffer)
+      .rotate()
+      .resize(size, size, { fit: 'cover', withoutEnlargement: false })
+      .jpeg({ quality, mozjpeg: true })
+      .toBuffer();
+
+    const key = `thumbnails/${id}/${size}.jpg`;
+
+    await s3Client.send(
+      new PutObjectCommand({
+        Bucket: THUMBNAIL_BUCKET,
+        Key: key,
+        Body: resized,
+        ContentType: 'image/jpeg',
+        CacheControl: 'public, max-age=31536000, immutable',
+      }),
+    );
+
+    return {
+      size,
+      key,
+      url: cdnUrl(key, { bucket: 'thumbnails' }),
+      bytes: resized.length,
+    };
+  });
+
+  return Promise.all(uploads);
 };
 
 /**
  * URL'den görsel indir ve S3'e yükle
  */
 const uploadFromUrl = async (imageUrl, options = {}) => {
-  const {
-    folder = 'generated',
-    userId,
-  } = options;
+  const { folder = 'generated', userId, thumbnailId } = options;
 
   // Fetch image from URL
   const response = await fetch(imageUrl);
-  
+
   if (!response.ok) {
     throw new Error(`Failed to fetch image from URL: ${response.status}`);
   }
@@ -144,19 +204,22 @@ const uploadFromUrl = async (imageUrl, options = {}) => {
     userId,
     contentType,
     optimize: true,
+    thumbnailId,
   });
 };
 
 /**
- * Signed URL oluştur (geçici erişim için)
+ * Signed URL oluştur (download için — detay/high-res akışı).
+ * TTL env'den okunur (SIGNED_URL_TTL_SECONDS, default 120s).
  */
-const getSignedDownloadUrl = async (key, expiresIn = 3600) => {
+const getSignedDownloadUrl = async (key, expiresIn) => {
+  const ttl = expiresIn || DEFAULT_SIGNED_URL_TTL;
   const command = new GetObjectCommand({
     Bucket: BUCKET_NAME,
     Key: key,
   });
 
-  return getSignedUrl(s3Client, command, { expiresIn });
+  return getSignedUrl(s3Client, command, { expiresIn: ttl });
 };
 
 /**
@@ -184,7 +247,8 @@ const getSignedUploadUrl = async (options = {}) => {
   return {
     uploadUrl: signedUrl,
     key,
-    publicUrl: `https://${BUCKET_NAME}.s3.${process.env.AWS_REGION || 'us-east-1'}.amazonaws.com/${key}`,
+    publicUrl: cdnUrl(key, { bucket: 'images' }),
+    rawS3Url: rawS3Url(key, 'images'),
     expiresIn,
   };
 };
@@ -222,6 +286,7 @@ module.exports = {
   optimizeImage,
   uploadImage,
   uploadFromUrl,
+  generateThumbnailVariants,
   getSignedDownloadUrl,
   getSignedUploadUrl,
   deleteImage,

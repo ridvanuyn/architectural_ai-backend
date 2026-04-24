@@ -26,6 +26,15 @@ const designSchema = new mongoose.Schema({
     // Preserved raw fal.ai URL used as a fallback when S3 upload fails so the
     // frontend can still render the generated preview.
     fallbackUrl: { type: String },
+    // CloudFront thumbnail (512) for list/feed screens. Falls back to `url`
+    // when thumbnail generation hasn't run yet for this design.
+    thumbnailUrl: { type: String },
+    // Full-resolution URL for detail/download. Usually equals `url` but stays
+    // stable even when `url` is later rewritten to a CDN thumbnail.
+    originalUrl: { type: String },
+    // Bumped when thumbnails are regenerated — appended as ?v=<n> so CDN
+    // edge caches treat it as a new object (no invalidation API calls).
+    imageVersion: { type: Number, default: 1 },
   },
 
   // Design details

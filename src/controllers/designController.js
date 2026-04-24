@@ -218,14 +218,18 @@ async function processDesignWithAI(designId, imageUrl, options) {
     let finalKey = null;
     let width = null;
     let height = null;
+    let thumbnailUrlVariant = null;
 
     // Try to upload to S3, but continue if it fails — the fal.ai URL is
     // temporary but still lets the frontend render the preview.
+    // thumbnailId tek fetch + tek optimize ile hem full-res hem 256/512/1024
+    // thumbnail üretir (s3Service içinde).
     try {
       console.log(`☁️ [design:${designId}] Uploading to S3…`);
       const s3Result = await s3Service.uploadFromUrl(rawFalUrl, {
         folder: 'generated',
         userId,
+        thumbnailId: designId.toString(),
       });
       // Only adopt the S3 URL if it's actually present — don't clobber a
       // perfectly-good fal URL with undefined if s3Service ever regresses.
@@ -234,7 +238,11 @@ async function processDesignWithAI(designId, imageUrl, options) {
         finalKey = s3Result.key;
         width = s3Result.width;
         height = s3Result.height;
+        thumbnailUrlVariant = s3Result.thumbnailUrl || null;
         console.log(`☁️ [design:${designId}] Uploaded to S3: ${s3Result.url}`);
+        if (thumbnailUrlVariant) {
+          console.log(`🖼  [design:${designId}] Thumbnail ready: ${thumbnailUrlVariant}`);
+        }
       } else {
         console.warn(`⚠️ [design:${designId}] S3 returned no URL, falling back to fal.ai URL`);
       }
@@ -258,6 +266,12 @@ async function processDesignWithAI(designId, imageUrl, options) {
         // Always preserve the raw fal.ai URL — callers may want it if the
         // S3 URL becomes invalid or when we only got the fal URL.
         fallbackUrl: rawFalUrl,
+        // Full-res URL for detail/download. Separated from `url` so the
+        // latter can later be swapped to a CDN thumbnail without regressing
+        // downloads.
+        originalUrl: finalUrl,
+        thumbnailUrl: thumbnailUrlVariant || finalUrl,
+        imageVersion: 1,
       };
       design.aiParams = {
         model: result.model,
@@ -569,14 +583,16 @@ exports.downloadDesign = async (req, res, next) => {
       });
     }
 
-    // Get signed URL for download
-    const downloadUrl = await s3Service.getSignedDownloadUrl(imageKey, 300);
+    // Signed URL TTL env'den (SIGNED_URL_TTL_SECONDS, default 120s) —
+    // logs/analytics sızıntı riskine karşı kısa TTL.
+    const expiresIn = parseInt(process.env.SIGNED_URL_TTL_SECONDS, 10) || 120;
+    const downloadUrl = await s3Service.getSignedDownloadUrl(imageKey, expiresIn);
 
     res.status(200).json({
       success: true,
       data: {
         downloadUrl,
-        expiresIn: 300,
+        expiresIn,
       },
     });
   } catch (error) {

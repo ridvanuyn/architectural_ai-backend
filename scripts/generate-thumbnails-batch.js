@@ -7,13 +7,16 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const { fal } = require('@fal-ai/client');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const sharp = require('sharp');
 const https = require('https');
 const http = require('http');
 const SpecialtyWorld = require('../src/models/SpecialtyWorld');
+const { thumbnailUrl } = require('../src/utils/cdnUrl');
 
-const BUCKET = 'architectural-ai-thumbnails';
+const BUCKET = process.env.AWS_S3_BUCKET_THUMBNAILS || 'architectural-ai-thumbnails';
 const REGION = process.env.AWS_REGION || 'eu-central-1';
 const MODEL = 'fal-ai/nano-banana';
+const SIZES = [256, 512, 1024];
 
 const falKey = (process.env.FAL_API_KEYS || '').split(',')[0].trim();
 fal.config({ credentials: falKey });
@@ -77,16 +80,59 @@ async function main() {
       if (!imageUrl) throw new Error('No image URL');
 
       const buffer = await downloadImage(imageUrl);
-      const key = `thumbnails/${world.id}.jpg`;
 
+      // Pre-generate 3 sizes (256/512/1024) and write to
+      // thumbnails/<id>/<size>.jpg — CloudFront serves these with long TTL.
+      const variants = await Promise.all(
+        SIZES.map(async (size) => {
+          const resized = await sharp(buffer)
+            .rotate()
+            .resize(size, size, { fit: 'cover', withoutEnlargement: false })
+            .jpeg({ quality: 82, mozjpeg: true })
+            .toBuffer();
+          const key = `thumbnails/${world.id}/${size}.jpg`;
+          await s3.send(new PutObjectCommand({
+            Bucket: BUCKET,
+            Key: key,
+            Body: resized,
+            ContentType: 'image/jpeg',
+            CacheControl: 'public, max-age=31536000, immutable',
+          }));
+          return { size, key, bytes: resized.length };
+        }),
+      );
+
+      const version = Date.now();
+      const thumb512 = thumbnailUrl(world.id, 512, version);
+      const legacyKey = `thumbnails/${world.id}.jpg`;
+      // Write the 512 variant to the legacy path too, so older app builds
+      // that hit `thumbnails/<id>.jpg` directly keep working.
+      const legacy512 = await sharp(buffer)
+        .rotate()
+        .resize(512, 512, { fit: 'cover', withoutEnlargement: false })
+        .jpeg({ quality: 82, mozjpeg: true })
+        .toBuffer();
       await s3.send(new PutObjectCommand({
-        Bucket: BUCKET, Key: key, Body: buffer, ContentType: 'image/jpeg',
+        Bucket: BUCKET,
+        Key: legacyKey,
+        Body: legacy512,
+        ContentType: 'image/jpeg',
+        CacheControl: 'public, max-age=31536000, immutable',
       }));
 
-      const s3Url = `https://${BUCKET}.s3.${REGION}.amazonaws.com/${key}`;
-      await SpecialtyWorld.updateOne({ id: world.id }, { $set: { imageUrl: s3Url } });
+      await SpecialtyWorld.updateOne(
+        { id: world.id },
+        {
+          $set: {
+            imageUrl: `https://${BUCKET}.s3.${REGION}.amazonaws.com/${legacyKey}`,
+            thumbnailUrl: thumb512,
+            imageVersion: version,
+          },
+        },
+      );
 
-      console.log(`  ✅ → ${s3Url}`);
+      const sizesLog = variants.map((v) => `${v.size}:${Math.round(v.bytes / 1024)}KB`).join(' ');
+      console.log(`  ✅ ${world.name} → ${sizesLog} | ${thumb512}`);
       success++;
     } catch (e) {
       console.error(`  ❌ ${world.name}: ${e.message}`);
