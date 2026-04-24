@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
+const pLimit = require('p-limit');
 const Design = require('../models/Design');
 const Transaction = require('../models/Transaction');
 const User = require('../models/User');
@@ -8,6 +9,14 @@ const { DESIGN_STATUS, TOKENS_PER_DESIGN, DESIGN_STYLES } = require('../config/c
 const s3Service = require('../services/s3Service');
 const falService = require('../services/falService');
 const styleController = require('./styleController');
+
+// Eş zamanlı fal.ai çağrılarını AI_CONCURRENCY ile sınırla — droplet OOM
+// koruması. 9. istek Mongo'ya PROCESSING olarak yazılır fakat semafor
+// boşalana kadar fal.ai'ye gitmeden kuyrukta bekler. Token düşme ve Mongo
+// insert semafordan ÖNCE (createDesign içinde) olur; semafor sadece ağır
+// olan AI + S3 upload adımını serileştirir.
+const aiLimit = pLimit(parseInt(process.env.AI_CONCURRENCY, 10) || 8);
+exports._aiLimit = aiLimit;
 
 // @desc    Upload image and get S3 URL
 // @route   POST /api/designs/upload
@@ -191,112 +200,119 @@ exports.createDesign = async (req, res, next) => {
 };
 
 /**
- * Process design with fal.ai nano-banana (background task)
+ * Process design with fal.ai nano-banana (background task).
+ *
+ * Tüm gövde aiLimit semaforu içinde çalışır — eş zamanlı fal.ai çağrılarını
+ * AI_CONCURRENCY (default 8) ile sınırlar. Limit dolu ise iş kuyrukta
+ * bekler (design kaydı Mongo'da zaten PROCESSING). Bu sayede droplet'te OOM
+ * ve fal.ai rate-limit hatası yaşamıyoruz.
  */
 async function processDesignWithAI(designId, imageUrl, options) {
   const { style, roomType, customPrompt, tier, userId } = options;
 
-  try {
-    console.log(`🚀 [design:${designId}] Processing | style: ${style} | tier: ${tier}${customPrompt ? ` | custom: "${customPrompt}"` : ''}`);
-
-    console.log(`🧪 [design:${designId}] Calling falService.transformImage…`);
-    const result = await falService.transformImage(imageUrl, {
-      style,
-      roomType,
-      customPrompt,
-      tier,
-    });
-
-    if (!result.success || !result.url) {
-      throw new Error('AI transformation returned no result');
-    }
-
-    console.log(`🎨 [design:${designId}] AI generated image URL: ${result.url}`);
-
-    const rawFalUrl = result.url;
-    let finalUrl = rawFalUrl;
-    let finalKey = null;
-    let width = null;
-    let height = null;
-    let thumbnailUrlVariant = null;
-
-    // Try to upload to S3, but continue if it fails — the fal.ai URL is
-    // temporary but still lets the frontend render the preview.
-    // thumbnailId tek fetch + tek optimize ile hem full-res hem 256/512/1024
-    // thumbnail üretir (s3Service içinde).
+  return aiLimit(async () => {
     try {
-      console.log(`☁️ [design:${designId}] Uploading to S3…`);
-      const s3Result = await s3Service.uploadFromUrl(rawFalUrl, {
-        folder: 'generated',
-        userId,
-        thumbnailId: designId.toString(),
+      console.log(`🚀 [design:${designId}] Processing | style: ${style} | tier: ${tier}${customPrompt ? ` | custom: "${customPrompt}"` : ''} | queue active=${aiLimit.activeCount} pending=${aiLimit.pendingCount}`);
+
+      console.log(`🧪 [design:${designId}] Calling falService.transformImage…`);
+      const result = await falService.transformImage(imageUrl, {
+        style,
+        roomType,
+        customPrompt,
+        tier,
       });
-      // Only adopt the S3 URL if it's actually present — don't clobber a
-      // perfectly-good fal URL with undefined if s3Service ever regresses.
-      if (s3Result && s3Result.url) {
-        finalUrl = s3Result.url;
-        finalKey = s3Result.key;
-        width = s3Result.width;
-        height = s3Result.height;
-        thumbnailUrlVariant = s3Result.thumbnailUrl || null;
-        console.log(`☁️ [design:${designId}] Uploaded to S3: ${s3Result.url}`);
-        if (thumbnailUrlVariant) {
-          console.log(`🖼  [design:${designId}] Thumbnail ready: ${thumbnailUrlVariant}`);
-        }
-      } else {
-        console.warn(`⚠️ [design:${designId}] S3 returned no URL, falling back to fal.ai URL`);
+
+      if (!result.success || !result.url) {
+        throw new Error('AI transformation returned no result');
       }
-    } catch (s3Error) {
-      // Full stack so we can diagnose sharp/content-type/fetch failures.
-      console.warn(
-        `⚠️ [design:${designId}] S3 upload failed, keeping fal.ai URL: ${s3Error.message}`
-      );
-      if (s3Error.stack) console.warn(s3Error.stack);
-    }
 
-    // Update design with generated image
-    console.log(`💾 [design:${designId}] Saving design record…`);
-    const design = await Design.findById(designId);
-    if (design) {
-      design.generatedImage = {
-        url: finalUrl,
-        key: finalKey,
-        width: width,
-        height: height,
-        // Always preserve the raw fal.ai URL — callers may want it if the
-        // S3 URL becomes invalid or when we only got the fal URL.
-        fallbackUrl: rawFalUrl,
-        // Full-res URL for detail/download. Separated from `url` so the
-        // latter can later be swapped to a CDN thumbnail without regressing
-        // downloads.
-        originalUrl: finalUrl,
-        thumbnailUrl: thumbnailUrlVariant || finalUrl,
-        imageVersion: 1,
-      };
-      design.aiParams = {
-        model: result.model,
-        prompt: result.prompts.positive,
-        negativePrompt: result.prompts.negative,
-      };
-      design.completeProcessing(finalUrl, finalKey);
-      await design.save();
+      console.log(`🎨 [design:${designId}] AI generated image URL: ${result.url}`);
 
-      console.log(`✅ [design:${designId}] completed successfully (final: ${finalUrl})`);
-    } else {
-      console.warn(`⚠️ [design:${designId}] not found when saving result`);
-    }
-  } catch (error) {
-    // Log full stack so we see where fal/sharp/fetch actually threw.
-    console.error(`❌ [design:${designId}] processing failed:`, error.message);
-    if (error.stack) console.error(error.stack);
+      const rawFalUrl = result.url;
+      let finalUrl = rawFalUrl;
+      let finalKey = null;
+      let width = null;
+      let height = null;
+      let thumbnailUrlVariant = null;
 
-    // Update design as failed
-    const design = await Design.findById(designId);
-    if (design) {
-      design.failProcessing(error.message);
-      await design.save();
+      // Try to upload to S3, but continue if it fails — the fal.ai URL is
+      // temporary but still lets the frontend render the preview.
+      // thumbnailId tek fetch + tek optimize ile hem full-res hem 256/512/1024
+      // thumbnail üretir (s3Service içinde).
+      try {
+        console.log(`☁️ [design:${designId}] Uploading to S3…`);
+        const s3Result = await s3Service.uploadFromUrl(rawFalUrl, {
+          folder: 'generated',
+          userId,
+          thumbnailId: designId.toString(),
+        });
+        // Only adopt the S3 URL if it's actually present — don't clobber a
+        // perfectly-good fal URL with undefined if s3Service ever regresses.
+        if (s3Result && s3Result.url) {
+          finalUrl = s3Result.url;
+          finalKey = s3Result.key;
+          width = s3Result.width;
+          height = s3Result.height;
+          thumbnailUrlVariant = s3Result.thumbnailUrl || null;
+          console.log(`☁️ [design:${designId}] Uploaded to S3: ${s3Result.url}`);
+          if (thumbnailUrlVariant) {
+            console.log(`🖼  [design:${designId}] Thumbnail ready: ${thumbnailUrlVariant}`);
+          }
+        } else {
+          console.warn(`⚠️ [design:${designId}] S3 returned no URL, falling back to fal.ai URL`);
+        }
+      } catch (s3Error) {
+        // Full stack so we can diagnose sharp/content-type/fetch failures.
+        console.warn(
+          `⚠️ [design:${designId}] S3 upload failed, keeping fal.ai URL: ${s3Error.message}`
+        );
+        if (s3Error.stack) console.warn(s3Error.stack);
+      }
+
+      // Update design with generated image
+      console.log(`💾 [design:${designId}] Saving design record…`);
+      const design = await Design.findById(designId);
+      if (design) {
+        design.generatedImage = {
+          url: finalUrl,
+          key: finalKey,
+          width: width,
+          height: height,
+          // Always preserve the raw fal.ai URL — callers may want it if the
+          // S3 URL becomes invalid or when we only got the fal URL.
+          fallbackUrl: rawFalUrl,
+          // Full-res URL for detail/download. Separated from `url` so the
+          // latter can later be swapped to a CDN thumbnail without regressing
+          // downloads.
+          originalUrl: finalUrl,
+          thumbnailUrl: thumbnailUrlVariant || finalUrl,
+          imageVersion: 1,
+        };
+        design.aiParams = {
+          model: result.model,
+          prompt: result.prompts.positive,
+          negativePrompt: result.prompts.negative,
+        };
+        design.completeProcessing(finalUrl, finalKey);
+        await design.save();
+
+        console.log(`✅ [design:${designId}] completed successfully (final: ${finalUrl})`);
+      } else {
+        console.warn(`⚠️ [design:${designId}] not found when saving result`);
+      }
+    } catch (error) {
+      // Log full stack so we see where fal/sharp/fetch actually threw.
+      console.error(`❌ [design:${designId}] processing failed:`, error.message);
+      if (error.stack) console.error(error.stack);
+
+      // Update design as failed
+      const design = await Design.findById(designId);
+      if (design) {
+        design.failProcessing(error.message);
+        await design.save();
+      }
     }
-  }
+  });
 }
 
 // @desc    Get all designs for current user
@@ -446,7 +462,7 @@ exports.getDesignStatus = async (req, res, next) => {
     const design = await Design.findOne({
       _id: req.params.id,
       user: req.user.id,
-    }).select('status processing generatedImage originalImage style');
+    }).select('status processing generatedImage originalImage style aiParams');
 
     if (!design) {
       return res.status(404).json({
@@ -454,6 +470,13 @@ exports.getDesignStatus = async (req, res, next) => {
         message: 'Design not found',
       });
     }
+
+    // Queue visibility: semafor dolu iken yeni design'lar PROCESSING olarak
+    // Mongo'ya yazılır fakat fal.ai'ye gitmez. aiParams.prompt sadece AI
+    // çağrısı başladıktan sonra set edildiği için, hâlâ boş ise kuyrukta
+    // kabul ediyoruz. Frontend bu bilgiyi polling UI'da gösterebilir.
+    const queuePending = aiLimit.pendingCount;
+    const queueActive = aiLimit.activeCount;
 
     res.status(200).json({
       success: true,
@@ -463,6 +486,9 @@ exports.getDesignStatus = async (req, res, next) => {
         originalImage: design.originalImage,
         style: design.style,
         processing: design.processing,
+        queue: design.status === 'processing' && !design.aiParams?.prompt
+          ? { position: queuePending, activeJobs: queueActive }
+          : null,
       },
     });
   } catch (error) {

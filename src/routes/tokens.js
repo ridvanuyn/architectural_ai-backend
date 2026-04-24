@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { protect } = require('../middleware/auth');
+const publicCache = require('../middleware/publicCache');
 const {
   getBalance,
   getPackages,
@@ -14,7 +15,7 @@ const {
 } = require('../controllers/tokenController');
 
 // Public routes
-router.get('/packages', getPackages);
+router.get('/packages', publicCache(3600), getPackages);
 
 // Protected routes
 router.use(protect);

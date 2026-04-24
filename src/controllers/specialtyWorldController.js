@@ -1,4 +1,7 @@
 const SpecialtyWorld = require('../models/SpecialtyWorld');
+const cache = require('../services/cacheService');
+
+const WORLDS_CACHE_TTL = 600; // 10 minutes
 
 // @desc    Get all specialty worlds
 // @route   GET /api/worlds
@@ -6,11 +9,6 @@ const SpecialtyWorld = require('../models/SpecialtyWorld');
 exports.getWorlds = async (req, res, next) => {
   try {
     const { category } = req.query;
-
-    const query = { isActive: true };
-    if (category) {
-      query.category = category;
-    }
 
     // Optional pagination: if the caller passes page or limit, serve a paged
     // response. Otherwise keep the legacy "return everything" behavior for
@@ -21,20 +19,40 @@ exports.getWorlds = async (req, res, next) => {
     const limitNum = Math.min(500, Math.max(1, parseInt(req.query.limit) || (hasPaging ? 20 : 500)));
     const skip = (pageNum - 1) * limitNum;
 
-    const sort = { isFeatured: -1, sortOrder: 1, createdAt: -1 };
+    // Cache key dahil edilen parametreler: category, page, limit. Bu üçü
+    // request response'unu etkilediği için hepsi key'e girer. Farklı page'ler
+    // farklı cache slot'ları olur; TTL 10 dk ve dataset küçük olduğu için
+    // splintering riski kabul edilebilir seviyede.
+    const keyParts = ['worlds:all:v1'];
+    if (category) keyParts.push(`cat=${category}`);
+    if (hasPaging) keyParts.push(`p=${pageNum}`, `l=${limitNum}`);
+    const cacheKey = keyParts.join(':');
 
-    const [worlds, total] = await Promise.all([
-      SpecialtyWorld.find(query).sort(sort).skip(skip).limit(limitNum).lean(),
-      SpecialtyWorld.countDocuments(query),
-    ]);
+    const payload = await cache.remember(cacheKey, WORLDS_CACHE_TTL, async () => {
+      const query = { isActive: true };
+      if (category) {
+        query.category = category;
+      }
+
+      const sort = { isFeatured: -1, sortOrder: 1, createdAt: -1 };
+
+      const [worlds, total] = await Promise.all([
+        SpecialtyWorld.find(query).sort(sort).skip(skip).limit(limitNum).lean(),
+        SpecialtyWorld.countDocuments(query),
+      ]);
+
+      return {
+        count: worlds.length,
+        total,
+        page: pageNum,
+        totalPages: Math.max(1, Math.ceil(total / limitNum)),
+        data: worlds,
+      };
+    });
 
     res.status(200).json({
       success: true,
-      count: worlds.length,
-      total,
-      page: pageNum,
-      totalPages: Math.max(1, Math.ceil(total / limitNum)),
-      data: worlds,
+      ...payload,
     });
   } catch (error) {
     next(error);
@@ -92,10 +110,12 @@ exports.getWorld = async (req, res, next) => {
 // @access  Public
 exports.getFeaturedWorlds = async (req, res, next) => {
   try {
-    const worlds = await SpecialtyWorld.find({ 
-      isActive: true,
-      isFeatured: true,
-    }).sort({ sortOrder: 1 }).limit(6);
+    const worlds = await cache.remember('worlds:featured:v1', WORLDS_CACHE_TTL, async () => {
+      return SpecialtyWorld.find({
+        isActive: true,
+        isFeatured: true,
+      }).sort({ sortOrder: 1 }).limit(6).lean();
+    });
 
     res.status(200).json({
       success: true,
@@ -111,7 +131,7 @@ exports.getFeaturedWorlds = async (req, res, next) => {
 // @access  Public
 exports.getWorldsByCategory = async (req, res, next) => {
   try {
-    const worlds = await SpecialtyWorld.find({ 
+    const worlds = await SpecialtyWorld.find({
       isActive: true,
       category: req.params.category,
     }).sort({ sortOrder: 1, name: 1 });
@@ -192,5 +212,18 @@ exports.getCategories = async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+};
+
+// Admin veya /create-world akışı yeni world eklediğinde çağrılır. Tüm
+// worlds:* cache key'lerini temizler. cacheService'de pattern-del yok; bu
+// yüzden bilinen sabit key'leri tek tek siliyoruz. Category/pagination
+// kombinasyonlarındaki türev key'ler TTL (10 dk) dolunca kendiliğinden
+// temizlenir — acil invalidasyon için buraya manuel key ekleyebilirsiniz.
+exports.invalidateWorldsCache = async () => {
+  await cache.del(
+    'worlds:all:v1',
+    'worlds:all:v1:featured',
+    'worlds:featured:v1',
+  );
 };
 

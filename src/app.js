@@ -5,6 +5,7 @@ const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const errorHandler = require('./middleware/errorHandler');
 const routes = require('./routes');
+const designController = require('./controllers/designController');
 
 const app = express();
 
@@ -41,13 +42,20 @@ if (process.env.NODE_ENV === 'development') {
 const path = require('path');
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
-// Health check
+// Health check — uptime, memory ve AI semafor durumu (droplet izleme için).
 app.get('/health', (req, res) => {
+  const aiLimit = designController._aiLimit;
   res.status(200).json({
     success: true,
     message: 'Architectural AI API is running',
     timestamp: new Date().toISOString(),
     version: '1.0.0',
+    status: 'ok',
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    ai: aiLimit
+      ? { active: aiLimit.activeCount, pending: aiLimit.pendingCount }
+      : null,
   });
 });
 

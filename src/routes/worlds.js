@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const publicCache = require('../middleware/publicCache');
 const {
   getWorlds,
   getWorld,
@@ -10,11 +11,11 @@ const {
 } = require('../controllers/specialtyWorldController');
 
 // All routes are public
-router.get('/', getWorlds);
-router.get('/search', searchWorlds);
-router.get('/featured', getFeaturedWorlds);
+router.get('/', publicCache(600), getWorlds);
+router.get('/search', publicCache(60), searchWorlds);
+router.get('/featured', publicCache(600), getFeaturedWorlds);
 router.get('/categories', getCategories);
-router.get('/category/:category', getWorldsByCategory);
+router.get('/category/:category', publicCache(600), getWorldsByCategory);
 router.get('/:id', getWorld);
 
 module.exports = router;

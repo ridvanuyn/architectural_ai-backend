@@ -1,6 +1,10 @@
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const { TOKEN_PACKAGES, TRANSACTION_TYPES } = require('../config/constants');
+const cache = require('../services/cacheService');
+
+const PACKAGES_CACHE_KEY = 'tokens:packages:v1';
+const PACKAGES_CACHE_TTL = 3600; // 1 hour
 
 // @desc    Get user's token balance
 // @route   GET /api/tokens/balance
@@ -32,14 +36,28 @@ exports.getBalance = async (req, res, next) => {
 // @access  Public
 exports.getPackages = async (req, res, next) => {
   try {
+    // TOKEN_PACKAGES şu an static constant; ancak ileride DB'ye taşınırsa
+    // diye cache.remember ile sarıyoruz. Static veri için bile Redis'ten
+    // JSON.parse etmek Node process'in constants.js require'ından yavaş
+    // değil — asıl kazanç ileride DB fetch geldiğinde ortaya çıkar.
+    const packages = await cache.remember(
+      PACKAGES_CACHE_KEY,
+      PACKAGES_CACHE_TTL,
+      async () => TOKEN_PACKAGES,
+    );
+
     res.status(200).json({
       success: true,
-      data: TOKEN_PACKAGES,
+      data: packages,
     });
   } catch (error) {
     next(error);
   }
 };
+
+// TOKEN_PACKAGES ileride dinamikleşirse (örn. admin panelinden düzenleme)
+// bu helper ile cache invalidate edilebilir.
+exports.invalidatePackagesCache = () => cache.del(PACKAGES_CACHE_KEY);
 
 // @desc    Purchase token package
 // @route   POST /api/tokens/purchase
