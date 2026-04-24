@@ -74,6 +74,7 @@ exports.getWorld = async (req, res, next) => {
       'categories',
       'category',
       'specialty',
+      'tags',
     ]);
     if (RESERVED_SEGMENTS.has(req.params.id)) {
       return res.status(200).json({
@@ -145,7 +146,7 @@ exports.getWorldsByCategory = async (req, res, next) => {
   }
 };
 
-// @desc    Search worlds with pagination
+// @desc    Search worlds with pagination + related suggestions
 // @route   GET /api/worlds/search
 // @access  Public
 exports.searchWorlds = async (req, res, next) => {
@@ -154,40 +155,81 @@ exports.searchWorlds = async (req, res, next) => {
     const pageNum = Math.max(1, parseInt(page));
     const limitNum = Math.min(50, Math.max(1, parseInt(limit)));
     const skip = (pageNum - 1) * limitNum;
+    const trimmedQ = q.trim();
 
-    const query = { isActive: true };
+    const projection = { name: 1, id: 1, description: 1, category: 1, imageUrl: 1, thumbnailUrl: 1, prompt: 1, price: 1, isProOnly: 1, isFeatured: 1, createdAt: 1 };
 
-    if (q.trim()) {
-      const escaped = q.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      query.$or = [
-        { name: { $regex: escaped, $options: 'i' } },
-        { description: { $regex: escaped, $options: 'i' } },
-        { id: { $regex: escaped, $options: 'i' } },
-        { prompt: { $regex: escaped, $options: 'i' } },
-      ];
+    const buildPayload = async () => {
+      const query = { isActive: true };
+
+      if (trimmedQ) {
+        const escaped = trimmedQ.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        query.$or = [
+          { name: { $regex: escaped, $options: 'i' } },
+          { description: { $regex: escaped, $options: 'i' } },
+          { id: { $regex: escaped, $options: 'i' } },
+          { prompt: { $regex: escaped, $options: 'i' } },
+        ];
+      }
+
+      if (category) {
+        query.category = category;
+      }
+
+      const [worlds, total] = await Promise.all([
+        SpecialtyWorld.find(query, projection)
+          .sort({ isFeatured: -1, sortOrder: 1, createdAt: -1 })
+          .skip(skip)
+          .limit(limitNum)
+          .lean(),
+        SpecialtyWorld.countDocuments(query),
+      ]);
+
+      const payload = {
+        count: worlds.length,
+        total,
+        page: pageNum,
+        totalPages: Math.max(1, Math.ceil(total / limitNum)),
+        data: worlds,
+      };
+
+      // Related suggestions — only when caller provided a query string.
+      if (trimmedQ) {
+        const excludeIds = worlds.map((w) => w._id);
+        // Prefer the first match's category; fall back to the query filter.
+        const relatedCategory = worlds[0]?.category || category;
+        const relatedQuery = { isActive: true };
+        if (excludeIds.length) relatedQuery._id = { $nin: excludeIds };
+        if (relatedCategory) {
+          relatedQuery.category = relatedCategory;
+        } else {
+          // No matches AND no category hint → fall back to featured worlds so
+          // the user sees *something* instead of an empty suggestions strip.
+          relatedQuery.isFeatured = true;
+        }
+
+        payload.related = await SpecialtyWorld.find(relatedQuery, projection)
+          .sort({ isFeatured: -1, sortOrder: 1 })
+          .limit(10)
+          .lean();
+      }
+
+      return payload;
+    };
+
+    // Only cache keyed searches; skip caching when q is empty (users browsing
+    // the full list without a query are already served by /worlds).
+    let payload;
+    if (trimmedQ) {
+      const cacheKey = `worlds:search:q=${trimmedQ.toLowerCase()}:cat=${category || ''}:p=${pageNum}:l=${limitNum}:v1`;
+      payload = await cache.remember(cacheKey, 60, buildPayload);
+    } else {
+      payload = await buildPayload();
     }
-
-    if (category) {
-      query.category = category;
-    }
-
-    const projection = { name: 1, id: 1, description: 1, category: 1, imageUrl: 1, prompt: 1, price: 1, isProOnly: 1, isFeatured: 1, createdAt: 1 };
-    const [worlds, total] = await Promise.all([
-      SpecialtyWorld.find(query, projection)
-        .sort({ isFeatured: -1, sortOrder: 1, createdAt: -1 })
-        .skip(skip)
-        .limit(limitNum)
-        .lean(),
-      SpecialtyWorld.countDocuments(query),
-    ]);
 
     res.status(200).json({
       success: true,
-      count: worlds.length,
-      total,
-      page: pageNum,
-      totalPages: Math.ceil(total / limitNum),
-      data: worlds,
+      ...payload,
     });
   } catch (error) {
     next(error);
@@ -214,16 +256,76 @@ exports.getCategories = async (req, res, next) => {
   }
 };
 
+// @desc    Get aggregated tag cloud (categories + franchises)
+// @route   GET /api/worlds/tags
+// @access  Public
+exports.getTags = async (req, res, next) => {
+  try {
+    const tags = await cache.remember('worlds:tags:v1', 3600, async () => {
+      const all = await SpecialtyWorld.find({ isActive: true })
+        .select('id category')
+        .lean();
+
+      // Category tags — directly map the enum counts.
+      const byCategory = {};
+      for (const w of all) {
+        if (!w.category) continue;
+        byCategory[w.category] = (byCategory[w.category] || 0) + 1;
+      }
+      const categoryTags = Object.entries(byCategory).map(([tag, count]) => ({
+        tag,
+        type: 'category',
+        count,
+        label: tag.charAt(0).toUpperCase() + tag.slice(1),
+      }));
+
+      // Franchise tags — derive from id kebab-prefix. Try both 1- and 2-segment
+      // prefixes; worlds with a shared franchise (>= 3 items) become a tag.
+      const franchiseCount = {};
+      for (const w of all) {
+        if (!w.id) continue;
+        const segs = w.id.split('-');
+        if (segs.length < 2) continue;
+        const prefix1 = segs[0];
+        const prefix2 = segs.slice(0, 2).join('-');
+        franchiseCount[prefix1] = (franchiseCount[prefix1] || 0) + 1;
+        if (prefix2 !== prefix1) {
+          franchiseCount[prefix2] = (franchiseCount[prefix2] || 0) + 1;
+        }
+      }
+      const franchiseTags = Object.entries(franchiseCount)
+        .filter(([, count]) => count >= 3)
+        .map(([tag, count]) => ({
+          tag,
+          type: 'franchise',
+          count,
+          label: tag
+            .split('-')
+            .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+            .join(' '),
+        }));
+
+      return [...categoryTags, ...franchiseTags].sort((a, b) => b.count - a.count);
+    });
+
+    res.status(200).json({ success: true, data: tags });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // Admin veya /create-world akışı yeni world eklediğinde çağrılır. Tüm
 // worlds:* cache key'lerini temizler. cacheService'de pattern-del yok; bu
-// yüzden bilinen sabit key'leri tek tek siliyoruz. Category/pagination
-// kombinasyonlarındaki türev key'ler TTL (10 dk) dolunca kendiliğinden
+// yüzden bilinen sabit key'leri tek tek siliyoruz. Category/pagination ve
+// search kombinasyonlarındaki türev key'ler TTL dolunca kendiliğinden
 // temizlenir — acil invalidasyon için buraya manuel key ekleyebilirsiniz.
 exports.invalidateWorldsCache = async () => {
   await cache.del(
     'worlds:all:v1',
     'worlds:all:v1:featured',
     'worlds:featured:v1',
+    'worlds:tags:v1',
   );
+  // Search cache'leri query string'e göre splinterlendiği için TTL'e bırak.
 };
 

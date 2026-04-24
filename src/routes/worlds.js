@@ -8,6 +8,7 @@ const {
   getWorldsByCategory,
   getCategories,
   searchWorlds,
+  getTags,
 } = require('../controllers/specialtyWorldController');
 
 // All routes are public
@@ -15,6 +16,7 @@ router.get('/', publicCache(600), getWorlds);
 router.get('/search', publicCache(60), searchWorlds);
 router.get('/featured', publicCache(600), getFeaturedWorlds);
 router.get('/categories', getCategories);
+router.get('/tags', publicCache(1800), getTags);
 router.get('/category/:category', publicCache(600), getWorldsByCategory);
 router.get('/:id', getWorld);
 
