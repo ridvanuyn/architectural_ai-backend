@@ -137,10 +137,21 @@ userSchema.methods.generateRefreshToken = function() {
   return refreshToken;
 };
 
+// Whether the user currently has an active, non-expired premium subscription.
+// Guards against an `isActive: true` flag that was never flipped off after the
+// subscription period ended (no renewal webhook yet) — an expired subscription
+// must NOT keep granting unlimited tokens.
+userSchema.methods.isSubscriptionActive = function() {
+  const sub = this.subscription || {};
+  if (!sub.isActive || sub.plan === 'free' || !sub.plan) return false;
+  // No endDate recorded → treat as active (legacy docs); otherwise must be future.
+  return !sub.endDate || sub.endDate > new Date();
+};
+
 // Check if user has enough tokens
 userSchema.methods.hasTokens = function(amount = 1) {
-  // Unlimited subscription
-  if (this.subscription.isActive && this.subscription.plan !== 'free') {
+  // Unlimited for an active (non-expired) subscription.
+  if (this.isSubscriptionActive()) {
     return true;
   }
   return this.tokens.balance >= amount;
@@ -148,7 +159,7 @@ userSchema.methods.hasTokens = function(amount = 1) {
 
 // Deduct tokens
 userSchema.methods.useTokens = function(amount = 1) {
-  if (this.subscription.isActive && this.subscription.plan !== 'free') {
+  if (this.isSubscriptionActive()) {
     return true; // Unlimited usage for premium
   }
   if (this.tokens.balance >= amount) {

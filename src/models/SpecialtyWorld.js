@@ -16,7 +16,7 @@ const specialtyWorldSchema = new mongoose.Schema({
   },
   category: {
     type: String,
-    enum: ['fantasy', 'historical', 'futuristic', 'cinematic', 'nature', 'luxury', 'animated', 'cultural', 'sci-fi', 'retro'],
+    enum: ['fantasy', 'historical', 'futuristic', 'cinematic', 'nature', 'luxury', 'animated', 'cultural', 'sci-fi', 'retro', 'home'],
     required: true,
   },
   // Legacy single-size URL (often still an Unsplash or `thumbnails/<id>.jpg`).

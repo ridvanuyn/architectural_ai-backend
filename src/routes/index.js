@@ -6,6 +6,7 @@ router.use('/designs', require('./designs'));
 router.use('/styles', require('./styles'));
 router.use('/tokens', require('./tokens'));
 router.use('/worlds', require('./worlds'));
+router.use('/requests', require('./requests'));
 router.use('/webhooks', require('./webhooks'));
 
 module.exports = router;

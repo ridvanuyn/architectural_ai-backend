@@ -20,7 +20,9 @@ exports.getBalance = async (req, res, next) => {
         totalPurchased: user.tokens.totalPurchased,
         totalUsed: user.tokens.totalUsed,
         subscription: {
-          isActive: user.subscription.isActive,
+          // Report the *effective* state — an expired subscription reads as
+          // inactive even if the stored flag was never flipped off.
+          isActive: user.isSubscriptionActive(),
           plan: user.subscription.plan,
           endDate: user.subscription.endDate,
         },
