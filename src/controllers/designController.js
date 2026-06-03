@@ -186,7 +186,9 @@ exports.createDesign = async (req, res, next) => {
       'stats.lastDesignAt': new Date(),
     });
 
-    // A new design means popularity counts just shifted — drop the cache.
+    // Record this style usage in the live "Most Used Styles" counter (Redis).
+    styleController.incrementStyleUsage(style).catch(() => {});
+    // Drop the legacy popularity cache (harmless no-op now).
     styleController.invalidatePopularityCache().catch(() => {});
 
     res.status(201).json({

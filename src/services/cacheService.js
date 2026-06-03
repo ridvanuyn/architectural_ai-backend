@@ -71,9 +71,52 @@ async function remember(key, ttlSeconds, loader) {
   return fresh;
 }
 
+// -------------------- Sorted-set helpers (live counters) --------------------
+
+/** Increment a member's score in a sorted set (no-op when Redis is down). */
+async function zincrby(key, member, amount = 1) {
+  if (!isReady) return;
+  try {
+    await getClient().zincrby(key, amount, member);
+  } catch {
+    // ignore — a missed increment is acceptable
+  }
+}
+
+/**
+ * Return `[[member, score], ...]` ordered high→low.
+ * Returns `null` when Redis is unavailable so callers can fall back to their
+ * own source (vs `[]` which means "available but empty").
+ */
+async function zrevrangeWithScores(key, start = 0, stop = -1) {
+  if (!isReady) return null;
+  try {
+    const flat = await getClient().zrevrange(key, start, stop, 'WITHSCORES');
+    const out = [];
+    for (let i = 0; i < flat.length; i += 2) {
+      out.push([flat[i], Number(flat[i + 1])]);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** Seed/overwrite member scores: `entries = [[member, score], ...]`. */
+async function zadd(key, entries) {
+  if (!isReady || !entries || entries.length === 0) return;
+  try {
+    const args = [];
+    for (const [member, score] of entries) args.push(score, member);
+    await getClient().zadd(key, ...args);
+  } catch {
+    // ignore
+  }
+}
+
 function ready() { return isReady; }
 
 // Kick off a connection attempt early so we avoid a cold start on first call.
 getClient();
 
-module.exports = { get, set, del, remember, ready };
+module.exports = { get, set, del, remember, ready, zincrby, zrevrangeWithScores, zadd };

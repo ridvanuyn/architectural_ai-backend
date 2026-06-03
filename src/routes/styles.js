@@ -8,8 +8,9 @@ const {
   getRecommendations,
 } = require('../controllers/styleController');
 
-// All routes are public
-router.get('/', publicCache(300), getStyles);
+// All routes are public. Short edge cache so "Most Used Styles" reflects the
+// live Redis usage counter promptly.
+router.get('/', publicCache(60), getStyles);
 router.get('/room-types', getRoomTypes);
 router.get('/recommendations/:roomType', getRecommendations);
 router.get('/:id', getStyle);
