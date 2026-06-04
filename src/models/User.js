@@ -67,6 +67,11 @@ const userSchema = new mongoose.Schema({
     transactionId: { type: String },
   },
 
+  // Referrals
+  referralCode: { type: String, unique: true, sparse: true, index: true },
+  referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  referralCount: { type: Number, default: 0 },
+
   // Onboarding
   onboarding: {
     completed: { type: Boolean, default: false },
