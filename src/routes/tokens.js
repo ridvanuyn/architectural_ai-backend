@@ -6,6 +6,7 @@ const {
   getBalance,
   getPackages,
   purchaseTokens,
+  syncSubscription,
   getTransactions,
   cancelSubscription,
   restorePurchases,
@@ -23,6 +24,7 @@ router.use(protect);
 router.get('/balance', getBalance);
 router.get('/transactions', getTransactions);
 router.post('/purchase', purchaseTokens);
+router.post('/subscription', syncSubscription);
 router.post('/subscription/cancel', cancelSubscription);
 router.post('/restore', restorePurchases);
 router.post('/promo', applyPromoCode);

@@ -34,16 +34,21 @@ const userSchema = new mongoose.Schema({
 
   // Token balance
   tokens: {
+    // Permanent balance — purchased packs + bonuses. Never expires.
     balance: { type: Number, default: INITIAL_FREE_TOKENS },
     totalPurchased: { type: Number, default: 0 },
     totalUsed: { type: Number, default: 0 },
+    // Subscription allowance — resets every period (use-it-or-lose-it). Does
+    // NOT roll over; spent before the permanent balance.
+    subscriptionBalance: { type: Number, default: 0 },
+    subscriptionPeriodEnd: { type: Date },
   },
 
   // Subscription
   subscription: {
     plan: {
       type: String,
-      enum: ['free', 'premium_monthly', 'premium_yearly'],
+      enum: ['free', 'premium_weekly', 'premium_monthly', 'premium_yearly'],
       default: 'free',
     },
     startDate: { type: Date },
@@ -137,40 +142,106 @@ userSchema.methods.generateRefreshToken = function() {
   return refreshToken;
 };
 
+// Subscription token allowance per plan. The allowance RESETS every period
+// (use-it-or-lose-it — unused tokens expire, they do NOT roll over).
+// `periodDays` = allowance refill cadence; `validityDays` = fallback
+// subscription length when the store expiry isn't supplied.
+const DAY_MS = 24 * 60 * 60 * 1000;
+const SUBSCRIPTION_ALLOWANCE = {
+  premium_weekly:  { tokens: 20, periodDays: 7,  validityDays: 7 },
+  premium_monthly: { tokens: 50, periodDays: 30, validityDays: 30 },
+  premium_yearly:  { tokens: 50, periodDays: 30, validityDays: 365 }, // monthly refill within the year
+};
+
 // Whether the user currently has an active, non-expired premium subscription.
 // Guards against an `isActive: true` flag that was never flipped off after the
-// subscription period ended (no renewal webhook yet) — an expired subscription
-// must NOT keep granting unlimited tokens.
+// subscription lapsed — an expired subscription grants no allowance.
 userSchema.methods.isSubscriptionActive = function() {
   const sub = this.subscription || {};
   if (!sub.isActive || sub.plan === 'free' || !sub.plan) return false;
-  // No endDate recorded → treat as active (legacy docs); otherwise must be future.
   return !sub.endDate || sub.endDate > new Date();
 };
 
-// Check if user has enough tokens
+// Lazily reset the expiring allowance when a new period begins. Overwrites
+// (never adds), so any unused tokens from the previous period simply expire.
+userSchema.methods.refreshSubscriptionAllowance = function() {
+  if (!this.isSubscriptionActive()) {
+    if (this.tokens.subscriptionBalance) this.tokens.subscriptionBalance = 0;
+    this.tokens.subscriptionPeriodEnd = undefined;
+    return;
+  }
+  const cfg = SUBSCRIPTION_ALLOWANCE[this.subscription.plan];
+  if (!cfg) return;
+  const now = new Date();
+  if (!this.tokens.subscriptionPeriodEnd || this.tokens.subscriptionPeriodEnd <= now) {
+    this.tokens.subscriptionBalance = cfg.tokens;
+    this.tokens.subscriptionPeriodEnd = new Date(now.getTime() + cfg.periodDays * DAY_MS);
+  }
+};
+
+// Currently spendable subscription allowance (0 when expired / not subscribed).
+userSchema.methods.subscriptionTokens = function() {
+  if (!this.isSubscriptionActive()) return 0;
+  const end = this.tokens.subscriptionPeriodEnd;
+  if (end && end <= new Date()) return 0; // expired, awaiting refill
+  return this.tokens.subscriptionBalance || 0;
+};
+
+// Total spendable = permanent balance + this period's subscription allowance.
+userSchema.methods.availableTokens = function() {
+  this.refreshSubscriptionAllowance();
+  return (this.tokens.balance || 0) + this.subscriptionTokens();
+};
+
+// Check if the user has enough tokens. No more "unlimited" — subscribers spend
+// from their (expiring) allowance like everyone else.
 userSchema.methods.hasTokens = function(amount = 1) {
-  // Unlimited for an active (non-expired) subscription.
-  if (this.isSubscriptionActive()) {
-    return true;
-  }
-  return this.tokens.balance >= amount;
+  return this.availableTokens() >= amount;
 };
 
-// Deduct tokens
+// Deduct tokens — spend the EXPIRING subscription allowance first, then the
+// permanent balance.
 userSchema.methods.useTokens = function(amount = 1) {
-  if (this.isSubscriptionActive()) {
-    return true; // Unlimited usage for premium
+  this.refreshSubscriptionAllowance();
+  if (this.availableTokens() < amount) return false;
+
+  let remaining = amount;
+  const fromSub = Math.min(this.subscriptionTokens(), remaining);
+  if (fromSub > 0) {
+    this.tokens.subscriptionBalance -= fromSub;
+    remaining -= fromSub;
   }
-  if (this.tokens.balance >= amount) {
-    this.tokens.balance -= amount;
-    this.tokens.totalUsed += amount;
-    return true;
+  if (remaining > 0) {
+    this.tokens.balance -= remaining;
   }
-  return false;
+  this.tokens.totalUsed += amount;
+  return true;
 };
 
-// Add tokens
+// Activate / renew / sync a subscription. Sets the plan window and refills the
+// expiring allowance only on a new period or plan change (safe to call on every
+// app launch). `storeExpiration` is the store's real expiry when available.
+userSchema.methods.syncSubscription = function(plan, storeExpiration) {
+  const cfg = SUBSCRIPTION_ALLOWANCE[plan];
+  if (!cfg) return false;
+  const now = new Date();
+  const planChanged = this.subscription.plan !== plan;
+
+  this.subscription.plan = plan;
+  this.subscription.isActive = true;
+  this.subscription.startDate = this.subscription.startDate || now;
+  this.subscription.endDate = storeExpiration
+    ? new Date(storeExpiration)
+    : new Date(now.getTime() + cfg.validityDays * DAY_MS);
+
+  if (planChanged || !this.tokens.subscriptionPeriodEnd || this.tokens.subscriptionPeriodEnd <= now) {
+    this.tokens.subscriptionBalance = cfg.tokens;
+    this.tokens.subscriptionPeriodEnd = new Date(now.getTime() + cfg.periodDays * DAY_MS);
+  }
+  return true;
+};
+
+// Add permanent tokens (purchased packs / bonuses) — never expire.
 userSchema.methods.addTokens = function(amount) {
   this.tokens.balance += amount;
   this.tokens.totalPurchased += amount;

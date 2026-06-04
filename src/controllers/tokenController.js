@@ -13,15 +13,58 @@ exports.getBalance = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id);
 
+    // `balance` is the TOTAL spendable = permanent balance + this period's
+    // (expiring) subscription allowance. availableTokens() also lazily refills
+    // the allowance when a new period has started, so persist any change.
+    const available = user.availableTokens();
+    await user.save();
+
     res.status(200).json({
       success: true,
       data: {
-        balance: user.tokens.balance,
+        balance: available,
+        permanentBalance: user.tokens.balance,
+        subscriptionBalance: user.subscriptionTokens(),
+        subscriptionPeriodEnd: user.tokens.subscriptionPeriodEnd,
         totalPurchased: user.tokens.totalPurchased,
         totalUsed: user.tokens.totalUsed,
         subscription: {
           // Report the *effective* state — an expired subscription reads as
           // inactive even if the stored flag was never flipped off.
+          isActive: user.isSubscriptionActive(),
+          plan: user.subscription.plan,
+          endDate: user.subscription.endDate,
+        },
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Activate / sync a subscription from the client's store entitlement.
+//          Sets the plan window and (re)fills the expiring token allowance.
+// @route   POST /api/tokens/subscription
+// @access  Private
+exports.syncSubscription = async (req, res, next) => {
+  try {
+    const { plan, expiresAt } = req.body;
+    const user = await User.findById(req.user.id);
+
+    const ok = user.syncSubscription(plan, expiresAt);
+    if (!ok) {
+      return res.status(400).json({ success: false, message: 'Unknown subscription plan' });
+    }
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      data: {
+        balance: user.availableTokens(),
+        permanentBalance: user.tokens.balance,
+        subscriptionBalance: user.subscriptionTokens(),
+        subscriptionPeriodEnd: user.tokens.subscriptionPeriodEnd,
+        subscription: {
           isActive: user.isSubscriptionActive(),
           plan: user.subscription.plan,
           endDate: user.subscription.endDate,
