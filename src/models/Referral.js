@@ -25,6 +25,16 @@ const referralSchema = new mongoose.Schema({
   tokensEach: {
     type: Number,
   },
+
+  // The referrer's reward is delayed: granted only after `referrerRewardAt`
+  // (redeem time + 24h). The referee is credited immediately on redeem.
+  referrerRewardAt: {
+    type: Date,
+  },
+  referrerRewarded: {
+    type: Boolean,
+    default: false,
+  },
 }, {
   timestamps: true,
 });

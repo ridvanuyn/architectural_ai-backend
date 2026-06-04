@@ -2,6 +2,7 @@ const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const { TOKEN_PACKAGES, TRANSACTION_TYPES } = require('../config/constants');
 const cache = require('../services/cacheService');
+const { processMaturedReferrals } = require('./referralController');
 
 const PACKAGES_CACHE_KEY = 'tokens:packages:v1';
 const PACKAGES_CACHE_TTL = 3600; // 1 hour
@@ -21,6 +22,10 @@ exports.getBalance = async (req, res, next) => {
     if (cached) {
       return res.status(200).json({ success: true, data: cached });
     }
+
+    // Grant any matured (24h) referrer rewards on activity (cache-miss path), so
+    // the inviter is paid even if they never open the referral screen.
+    await processMaturedReferrals(userId).catch(() => {});
 
     const user = await User.findById(userId);
 
