@@ -7,6 +7,7 @@ const {
   getPackages,
   purchaseTokens,
   syncSubscription,
+  testGrantExpiring,
   getTransactions,
   cancelSubscription,
   restorePurchases,
@@ -14,6 +15,7 @@ const {
   grantTokens,
   refundTokens,
 } = require('../controllers/tokenController');
+const { redeemCode } = require('../controllers/promoController');
 
 // Public routes
 router.get('/packages', publicCache(3600), getPackages);
@@ -28,6 +30,8 @@ router.post('/subscription', syncSubscription);
 router.post('/subscription/cancel', cancelSubscription);
 router.post('/restore', restorePurchases);
 router.post('/promo', applyPromoCode);
+router.post('/redeem', redeemCode);
+router.post('/test/grant-expiring', testGrantExpiring);
 router.post('/grant', grantTokens);
 router.post('/refund', refundTokens);
 

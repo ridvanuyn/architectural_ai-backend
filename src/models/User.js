@@ -42,6 +42,15 @@ const userSchema = new mongoose.Schema({
     // NOT roll over; spent before the permanent balance.
     subscriptionBalance: { type: Number, default: 0 },
     subscriptionPeriodEnd: { type: Date },
+    // Promo/redeem-code grants. Each lot expires independently N days after the
+    // code was redeemed. Expiring → spent before the permanent balance.
+    promoLots: [
+      {
+        amount: { type: Number },
+        expiresAt: { type: Date },
+        _id: false,
+      },
+    ],
   },
 
   // Subscription
@@ -187,10 +196,24 @@ userSchema.methods.subscriptionTokens = function() {
   return this.tokens.subscriptionBalance || 0;
 };
 
-// Total spendable = permanent balance + this period's subscription allowance.
+// Prune expired promo lots in place and return the remaining promo tokens.
+userSchema.methods.promoTokens = function() {
+  const now = new Date();
+  const lots = (this.tokens.promoLots || []).filter((l) => l.amount > 0 && l.expiresAt > now);
+  this.tokens.promoLots = lots;
+  return lots.reduce((sum, l) => sum + l.amount, 0);
+};
+
+// Add an expiring promo grant (from a redeemed code).
+userSchema.methods.addPromoTokens = function(amount, expiresAt) {
+  if (!this.tokens.promoLots) this.tokens.promoLots = [];
+  this.tokens.promoLots.push({ amount, expiresAt });
+};
+
+// Total spendable = permanent balance + subscription allowance + promo tokens.
 userSchema.methods.availableTokens = function() {
   this.refreshSubscriptionAllowance();
-  return (this.tokens.balance || 0) + this.subscriptionTokens();
+  return (this.tokens.balance || 0) + this.subscriptionTokens() + this.promoTokens();
 };
 
 // Check if the user has enough tokens. No more "unlimited" — subscribers spend
@@ -199,21 +222,38 @@ userSchema.methods.hasTokens = function(amount = 1) {
   return this.availableTokens() >= amount;
 };
 
-// Deduct tokens — spend the EXPIRING subscription allowance first, then the
-// permanent balance.
+// Deduct tokens — spend EXPIRING tokens first (subscription allowance, then
+// promo lots by soonest expiry), then the permanent balance.
 userSchema.methods.useTokens = function(amount = 1) {
-  this.refreshSubscriptionAllowance();
+  // availableTokens() refreshes the subscription allowance and prunes promo lots.
   if (this.availableTokens() < amount) return false;
 
   let remaining = amount;
+
+  // 1) Subscription allowance (expires at period end).
   const fromSub = Math.min(this.subscriptionTokens(), remaining);
   if (fromSub > 0) {
     this.tokens.subscriptionBalance -= fromSub;
     remaining -= fromSub;
   }
+
+  // 2) Promo lots, soonest expiry first (also expiring).
+  if (remaining > 0 && this.tokens.promoLots && this.tokens.promoLots.length) {
+    this.tokens.promoLots.sort((a, b) => new Date(a.expiresAt) - new Date(b.expiresAt));
+    for (const lot of this.tokens.promoLots) {
+      if (remaining <= 0) break;
+      const take = Math.min(lot.amount, remaining);
+      lot.amount -= take;
+      remaining -= take;
+    }
+    this.tokens.promoLots = this.tokens.promoLots.filter((l) => l.amount > 0);
+  }
+
+  // 3) Permanent balance (never expires).
   if (remaining > 0) {
     this.tokens.balance -= remaining;
   }
+
   this.tokens.totalUsed += amount;
   return true;
 };

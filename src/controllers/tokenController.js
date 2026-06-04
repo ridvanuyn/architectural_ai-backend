@@ -19,6 +19,12 @@ exports.getBalance = async (req, res, next) => {
     const available = user.availableTokens();
     await user.save();
 
+    // Soonest upcoming promo-lot expiry (for "expires on …" UI).
+    const promoExpiresAt = (user.tokens.promoLots || [])
+      .map((l) => l.expiresAt)
+      .filter(Boolean)
+      .sort((a, b) => new Date(a) - new Date(b))[0] || null;
+
     res.status(200).json({
       success: true,
       data: {
@@ -26,6 +32,8 @@ exports.getBalance = async (req, res, next) => {
         permanentBalance: user.tokens.balance,
         subscriptionBalance: user.subscriptionTokens(),
         subscriptionPeriodEnd: user.tokens.subscriptionPeriodEnd,
+        promoBalance: user.promoTokens(),
+        promoExpiresAt,
         totalPurchased: user.tokens.totalPurchased,
         totalUsed: user.tokens.totalUsed,
         subscription: {
@@ -36,6 +44,38 @@ exports.getBalance = async (req, res, next) => {
           endDate: user.subscription.endDate,
         },
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    TEST ONLY — grant short-lived expiring tokens to watch them expire.
+//          Disabled unless ENABLE_TEST_ENDPOINTS=true on the server.
+// @route   POST /api/tokens/test/grant-expiring
+// @access  Private (guarded by env flag)
+exports.testGrantExpiring = async (req, res, next) => {
+  try {
+    if (process.env.ENABLE_TEST_ENDPOINTS !== 'true') {
+      return res.status(403).json({ success: false, message: 'Test endpoints are disabled' });
+    }
+    const seconds = Math.max(5, parseInt(req.body.seconds, 10) || 60);
+    const amount = Math.max(1, parseInt(req.body.amount, 10) || 10);
+    const expiresAt = new Date(Date.now() + seconds * 1000);
+
+    const user = await User.findById(req.user.id);
+    user.addPromoTokens(amount, expiresAt);
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      data: {
+        granted: amount,
+        expiresAt,
+        balance: user.availableTokens(),
+        promoBalance: user.promoTokens(),
+      },
+      message: `${amount} test tokens added, expiring in ${seconds}s`,
     });
   } catch (error) {
     next(error);
