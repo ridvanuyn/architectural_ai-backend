@@ -37,6 +37,9 @@ const publicLimiter = rateLimit({
   keyGenerator: realIp,
   standardHeaders: true,
   legacyHeaders: false,
+  // Webhook'lar fal/Replicate'in IP'lerinden gelir; hepsi tek key'e düşüp
+  // global limite takılmasın diye muaf — kendi shared-secret doğrulaması var.
+  skip: (req) => req.path.startsWith('/webhooks'),
   message: {
     success: false,
     message: 'Too many requests, please try again later.',

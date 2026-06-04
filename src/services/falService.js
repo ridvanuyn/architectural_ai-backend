@@ -302,6 +302,58 @@ async function transformImage(imageUrl, options = {}) {
   };
 }
 
+/**
+ * Async variant of transformImage: submit the generation to fal's QUEUE and
+ * return immediately with a request_id. fal will POST the result to
+ * `webhookUrl` when generation finishes (10–40s later) — so the droplet stops
+ * babysitting a long-lived `fal.subscribe` job per generation. The webhook
+ * handler does the S3/sharp upload. Used for the production hot path; the
+ * blocking transformImage above is kept for scripts and the local-dev fallback
+ * (where a public webhook URL isn't reachable).
+ *
+ * @param {string} imageUrl - source image URL (S3/CDN/public)
+ * @param {object} options - { style, roomType, customPrompt, tier|isPremium }
+ * @param {string} webhookUrl - public URL fal should call back with the result
+ * @returns {Promise<{requestId:string, model:string, prompt:string, tier:string}>}
+ */
+async function submitTransform(imageUrl, options = {}, webhookUrl) {
+  const {
+    style = 'modern',
+    roomType = 'living_room',
+    customPrompt = '',
+    isPremium,
+  } = options;
+
+  let tier = options.tier;
+  if (!tier) tier = isPremium ? 'pro' : 'free';
+  const tierConfig = MODEL_TIERS[tier] || MODEL_TIERS.free;
+
+  const prompt = generatePrompt(style, roomType, customPrompt);
+
+  console.log(`📨 fal.ai queue submit [${tierConfig.label}] style "${style}"${customPrompt ? ` | custom: "${customPrompt}"` : ''}`);
+
+  const submission = await withKeyRotation(async () => {
+    const publicUrl = await ensurePublicUrl(imageUrl);
+
+    const input = tier === 'free'
+      ? { prompt, image_url: publicUrl, num_images: 1 }
+      : { prompt, image_urls: [publicUrl], num_images: 1, output_format: 'jpeg' };
+
+    // Queue mode: returns { request_id } right away; result is delivered to
+    // webhookUrl when ready. No long-lived job held in this process.
+    return fal.queue.submit(tierConfig.model, { input, webhookUrl });
+  });
+
+  const requestId = submission?.request_id || submission?.requestId;
+  if (!requestId) {
+    throw new Error('fal.queue.submit returned no request_id');
+  }
+
+  console.log(`✅ fal.ai queued: request ${requestId}`);
+
+  return { requestId, model: tierConfig.model, prompt, tier };
+}
+
 function getAvailableStyles() {
   return DESIGN_STYLES.map(style => ({
     ...style,
@@ -326,6 +378,7 @@ module.exports = {
   PRO_MODEL,
   X5_MODEL,
   transformImage,
+  submitTransform,
   generatePrompt,
   getAvailableStyles,
   getKeyStatus,

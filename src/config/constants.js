@@ -104,8 +104,10 @@ module.exports = {
     MAX_SIZE_MB: 10,
     ALLOWED_FORMATS: ['image/jpeg', 'image/png', 'image/webp'],
     OUTPUT_FORMAT: 'jpeg',
-    OUTPUT_QUALITY: 90,
-    MAX_DIMENSION: 2048,
+    // 82 + 1536px: tek vCPU'da sharp CPU/RAM maliyetini düşürür, S3 objesi
+    // küçülür; görsel kalite farkı interior render'larda ihmal edilebilir.
+    OUTPUT_QUALITY: 82,
+    MAX_DIMENSION: 1536,
   },
 
   // AI processing settings (Replicate)

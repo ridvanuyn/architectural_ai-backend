@@ -78,6 +78,10 @@ const designSchema = new mongoose.Schema({
     inferenceSteps: { type: Number },
     guidanceScale: { type: Number },
     seed: { type: Number },
+    // fal/Replicate queue request id. Set when a generation is submitted to the
+    // async queue; the webhook looks the design up by this id when the result
+    // arrives. Indexed for fast webhook lookups.
+    predictionId: { type: String, index: true },
   },
 
   // User interaction

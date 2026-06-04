@@ -10,12 +10,13 @@ const s3Service = require('../services/s3Service');
 const falService = require('../services/falService');
 const styleController = require('./styleController');
 
-// Eş zamanlı fal.ai çağrılarını AI_CONCURRENCY ile sınırla — droplet OOM
-// koruması. 9. istek Mongo'ya PROCESSING olarak yazılır fakat semafor
-// boşalana kadar fal.ai'ye gitmeden kuyrukta bekler. Token düşme ve Mongo
-// insert semafordan ÖNCE (createDesign içinde) olur; semafor sadece ağır
-// olan AI + S3 upload adımını serileştirir.
-const aiLimit = pLimit(parseInt(process.env.AI_CONCURRENCY, 10) || 8);
+// Eş zamanlı fal.ai çağrılarını AI_CONCURRENCY (default 4) ile sınırla —
+// droplet OOM koruması. Limit dolu iken gelen istek Mongo'ya PROCESSING olarak
+// yazılır fakat semafor boşalana kadar fal.ai'ye gitmeden kuyrukta bekler.
+// Token düşme ve Mongo insert semafordan ÖNCE (createDesign içinde) olur.
+// Async (webhook) yolda semafor sadece hızlı queue-submit'i; blocking yolda
+// ise tüm AI + S3 upload adımını sınırlar.
+const aiLimit = pLimit(parseInt(process.env.AI_CONCURRENCY, 10) || 4);
 exports._aiLimit = aiLimit;
 
 // @desc    Upload image and get S3 URL
@@ -201,15 +202,87 @@ exports.createDesign = async (req, res, next) => {
   }
 };
 
+// Public base URL fal should call back on. When set to a real (non-localhost)
+// URL we use fal's async QUEUE + webhook so the droplet never babysits a
+// long-lived generation. Unset / localhost (local dev, simulator) → fall back
+// to the blocking subscribe path, which still works without a public callback.
+const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
+const FAL_WEBHOOK_SECRET = process.env.FAL_WEBHOOK_SECRET || '';
+
+function falWebhookUrl() {
+  if (!PUBLIC_URL || PUBLIC_URL.includes('localhost') || PUBLIC_URL.includes('127.0.0.1')) {
+    return null;
+  }
+  const q = FAL_WEBHOOK_SECRET ? `?secret=${encodeURIComponent(FAL_WEBHOOK_SECRET)}` : '';
+  return `${PUBLIC_URL}/api/webhooks/fal${q}`;
+}
+
 /**
- * Process design with fal.ai nano-banana (background task).
+ * Dispatch a design generation. Prefers the async fal QUEUE + webhook (no
+ * long-lived job on the box); falls back to the blocking path when no public
+ * webhook URL is configured (local dev / simulator).
+ */
+function processDesignWithAI(designId, imageUrl, options) {
+  const webhookUrl = falWebhookUrl();
+  if (webhookUrl) {
+    return submitDesignToFal(designId, imageUrl, options, webhookUrl);
+  }
+  return processDesignBlocking(designId, imageUrl, options);
+}
+
+/**
+ * Async path: submit to fal's queue and return. fal POSTs the result to our
+ * webhook (handleFalWebhook) when ready, which then does the S3/sharp upload.
+ * The aiLimit semaphore now only guards the cheap submit call, not the whole
+ * 10–40s generation, so the box can hold far more in-flight generations.
+ */
+async function submitDesignToFal(designId, imageUrl, options, webhookUrl) {
+  const { style, roomType, customPrompt, tier } = options;
+
+  return aiLimit(async () => {
+    try {
+      console.log(`🚀 [design:${designId}] Submitting to fal queue | style: ${style} | tier: ${tier} | active=${aiLimit.activeCount} pending=${aiLimit.pendingCount}`);
+
+      const { requestId, model, prompt } = await falService.submitTransform(
+        imageUrl,
+        { style, roomType, customPrompt, tier },
+        webhookUrl,
+      );
+
+      const design = await Design.findById(designId);
+      if (design) {
+        design.aiParams = {
+          ...(design.aiParams ? design.aiParams.toObject?.() || design.aiParams : {}),
+          model,
+          prompt,
+          predictionId: requestId,
+        };
+        await design.save();
+        console.log(`📨 [design:${designId}] queued (request ${requestId}) — awaiting webhook`);
+      } else {
+        console.warn(`⚠️ [design:${designId}] not found when storing request id`);
+      }
+    } catch (error) {
+      console.error(`❌ [design:${designId}] fal submit failed:`, error.message);
+      if (error.stack) console.error(error.stack);
+      const design = await Design.findById(designId);
+      if (design) {
+        design.failProcessing(error.message);
+        await design.save();
+      }
+    }
+  });
+}
+
+/**
+ * Process design with fal.ai nano-banana (background task) — BLOCKING path.
  *
  * Tüm gövde aiLimit semaforu içinde çalışır — eş zamanlı fal.ai çağrılarını
- * AI_CONCURRENCY (default 8) ile sınırlar. Limit dolu ise iş kuyrukta
- * bekler (design kaydı Mongo'da zaten PROCESSING). Bu sayede droplet'te OOM
- * ve fal.ai rate-limit hatası yaşamıyoruz.
+ * AI_CONCURRENCY ile sınırlar. Limit dolu ise iş kuyrukta bekler (design kaydı
+ * Mongo'da zaten PROCESSING). Sadece public webhook URL yokken (local dev /
+ * simulator) kullanılır; canlıda async queue + webhook tercih edilir.
  */
-async function processDesignWithAI(designId, imageUrl, options) {
+async function processDesignBlocking(designId, imageUrl, options) {
   const { style, roomType, customPrompt, tier, userId } = options;
 
   return aiLimit(async () => {
