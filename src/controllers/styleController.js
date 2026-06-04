@@ -1,4 +1,5 @@
 const Design = require('../models/Design');
+const SpecialtyWorld = require('../models/SpecialtyWorld');
 const { DESIGN_STYLES, ROOM_TYPES } = require('../config/constants');
 const cache = require('../services/cacheService');
 
@@ -96,6 +97,122 @@ exports.incrementStyleFromGeneration = async (styleId, customPrompt) => {
   }
   if (!id) return;
   await cache.zincrby(STYLE_USAGE_KEY, id, 1);
+};
+
+// ---------------------------------------------------------------------------
+// App-wide "Most Used" by the ACTUAL name generated — base style name ("Modern")
+// OR specialty-world name ("Gatsby"). Members are display names, scores are
+// total usages across all users. Read by GET /api/styles/popular. This is what
+// the home "Most Used Styles" rail shows, so it surfaces real worlds/themes by
+// name instead of collapsing everything into the 16 base style categories.
+// ---------------------------------------------------------------------------
+const USAGE_ITEMS_KEY = 'usage:items:v1';
+const POPULAR_CACHE_KEY = 'usage:items:resolved:v1';
+const GENERIC_NAMES = new Set(['', 'design', 'custom', 'custom design']);
+
+function isGenericName(name) {
+  return !name || GENERIC_NAMES.has(String(name).trim().toLowerCase());
+}
+
+// Bump the app-wide usage counter for whatever the user actually generated.
+// Called on each design create with the display name (req.body.title).
+exports.incrementItemUsage = async (name) => {
+  if (isGenericName(name)) return;
+  await cache.zincrby(USAGE_ITEMS_KEY, String(name).trim(), 1);
+  // Drop the resolved cache so the rail reflects the new count promptly.
+  cache.del(POPULAR_CACHE_KEY).catch(() => {});
+};
+
+// Seed/fallback source: design history grouped by the stored title (the display
+// name shown to the user). Used to bootstrap the counter and when Redis is down.
+async function popularNamesFromDb() {
+  const rows = await Design.aggregate([
+    { $match: { isDeleted: false, title: { $nin: [null, ''] } } },
+    { $group: { _id: '$title', count: { $sum: 1 } } },
+    { $sort: { count: -1 } },
+    { $limit: 60 },
+  ]);
+  return rows
+    .filter((r) => !isGenericName(r._id))
+    .map((r) => [String(r._id).trim(), r.count]);
+}
+
+// Resolve [name, count] pairs into display items, attaching a thumbnail by
+// matching the name to a specialty world (preferred) or a base style. A stale
+// "X Design" title also matches the "X" base style. Names that resolve to
+// neither are dropped (so the rail never shows an imageless tile).
+async function resolvePopularItems(ranked) {
+  const styleByName = {};
+  DESIGN_STYLES.forEach((s) => { styleByName[s.name.toLowerCase()] = s; });
+
+  const names = ranked.map(([name]) => name);
+  const worlds = await SpecialtyWorld.find({
+    name: { $in: names },
+    isActive: true,
+  }).select('id name thumbnailUrl imageUrl prompt').lean();
+  const worldByName = {};
+  worlds.forEach((w) => { worldByName[w.name.toLowerCase()] = w; });
+
+  const items = [];
+  for (const [name, count] of ranked) {
+    const key = name.toLowerCase();
+    const altKey = key.replace(/\s+design$/, '');
+    const world = worldByName[key];
+    const style = styleByName[key] || styleByName[altKey];
+
+    if (world && (world.thumbnailUrl || world.imageUrl)) {
+      items.push({
+        name: world.name,
+        imageUrl: world.thumbnailUrl || world.imageUrl,
+        count,
+        kind: 'world',
+        worldId: world.id,
+        prompt: world.prompt,
+      });
+    } else if (style) {
+      items.push({
+        name: style.name,
+        imageUrl: style.imageUrl,
+        count,
+        kind: 'style',
+        styleId: style.id,
+      });
+    }
+  }
+  return items;
+}
+
+// @desc    App-wide most-used styles/worlds by actual name (home rail)
+// @route   GET /api/styles/popular
+// @access  Public
+exports.getPopular = async (req, res, next) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 12, 30);
+
+    const cached = await cache.get(POPULAR_CACHE_KEY);
+    if (cached) {
+      const data = cached.slice(0, limit);
+      return res.status(200).json({ success: true, data, count: data.length });
+    }
+
+    let ranked = await cache.zrevrangeWithScores(USAGE_ITEMS_KEY);
+    if (ranked === null) {
+      ranked = await popularNamesFromDb(); // Redis unavailable
+    } else if (ranked.length === 0) {
+      const seed = await popularNamesFromDb(); // first run — seed from history
+      if (seed.length > 0) await cache.zadd(USAGE_ITEMS_KEY, seed);
+      ranked = seed;
+    }
+
+    // Resolve extra (some names won't map to a thumbnail), then trim.
+    const resolved = await resolvePopularItems(ranked.slice(0, limit * 3));
+    await cache.set(POPULAR_CACHE_KEY, resolved, 60);
+
+    const data = resolved.slice(0, limit);
+    res.status(200).json({ success: true, data, count: data.length });
+  } catch (error) {
+    next(error);
+  }
 };
 
 // Kept for callers that bust the legacy list cache (now a harmless no-op since
