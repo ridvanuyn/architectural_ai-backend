@@ -116,7 +116,21 @@ async function zadd(key, entries) {
 
 function ready() { return isReady; }
 
+// -------------------- Per-user token balance cache --------------------
+
+const balanceKey = (userId) => `balance:${userId}`;
+
+/** Invalidate a user's cached token balance (called on any token change). */
+async function delBalance(userId) {
+  if (!userId) return;
+  await del(balanceKey(userId));
+}
+
 // Kick off a connection attempt early so we avoid a cold start on first call.
 getClient();
 
-module.exports = { get, set, del, remember, ready, zincrby, zrevrangeWithScores, zadd };
+module.exports = {
+  get, set, del, remember, ready,
+  zincrby, zrevrangeWithScores, zadd,
+  balanceKey, delBalance,
+};

@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { JWT_EXPIRE, INITIAL_FREE_TOKENS } = require('../config/constants');
+const cache = require('../services/cacheService');
 
 const userSchema = new mongoose.Schema({
   email: {
@@ -286,6 +287,12 @@ userSchema.methods.addTokens = function(amount) {
   this.tokens.balance += amount;
   this.tokens.totalPurchased += amount;
 };
+
+// Any user write (token spend/grant/refill, profile, ...) invalidates the
+// cached balance so getBalance recomputes from the DB source of truth.
+userSchema.post('save', function (doc) {
+  cache.delBalance(doc._id).catch(() => {});
+});
 
 module.exports = mongoose.model('User', userSchema);
 

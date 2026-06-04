@@ -11,11 +11,22 @@ const PACKAGES_CACHE_TTL = 3600; // 1 hour
 // @access  Private
 exports.getBalance = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user.id);
+    const userId = req.user.id;
+    const cacheKey = cache.balanceKey(userId);
 
-    // `balance` is the TOTAL spendable = permanent balance + this period's
-    // (expiring) subscription allowance. availableTokens() also lazily refills
-    // the allowance when a new period has started, so persist any change.
+    // Short-lived Redis cache (source of truth stays the DB). Invalidated on any
+    // user write via the User post-save hook, so changes show up immediately;
+    // only the time-based expiry has up-to-TTL lag.
+    const cached = await cache.get(cacheKey);
+    if (cached) {
+      return res.status(200).json({ success: true, data: cached });
+    }
+
+    const user = await User.findById(userId);
+
+    // `balance` is the TOTAL spendable = permanent + this period's (expiring)
+    // subscription allowance + live promo tokens. availableTokens() also lazily
+    // refills/prunes, so persist any change.
     const available = user.availableTokens();
     await user.save();
 
@@ -25,26 +36,26 @@ exports.getBalance = async (req, res, next) => {
       .filter(Boolean)
       .sort((a, b) => new Date(a) - new Date(b))[0] || null;
 
-    res.status(200).json({
-      success: true,
-      data: {
-        balance: available,
-        permanentBalance: user.tokens.balance,
-        subscriptionBalance: user.subscriptionTokens(),
-        subscriptionPeriodEnd: user.tokens.subscriptionPeriodEnd,
-        promoBalance: user.promoTokens(),
-        promoExpiresAt,
-        totalPurchased: user.tokens.totalPurchased,
-        totalUsed: user.tokens.totalUsed,
-        subscription: {
-          // Report the *effective* state — an expired subscription reads as
-          // inactive even if the stored flag was never flipped off.
-          isActive: user.isSubscriptionActive(),
-          plan: user.subscription.plan,
-          endDate: user.subscription.endDate,
-        },
+    const data = {
+      balance: available,
+      permanentBalance: user.tokens.balance,
+      subscriptionBalance: user.subscriptionTokens(),
+      subscriptionPeriodEnd: user.tokens.subscriptionPeriodEnd,
+      promoBalance: user.promoTokens(),
+      promoExpiresAt,
+      totalPurchased: user.tokens.totalPurchased,
+      totalUsed: user.tokens.totalUsed,
+      subscription: {
+        // Report the *effective* state — an expired subscription reads as
+        // inactive even if the stored flag was never flipped off.
+        isActive: user.isSubscriptionActive(),
+        plan: user.subscription.plan,
+        endDate: user.subscription.endDate,
       },
-    });
+    };
+
+    await cache.set(cacheKey, data, 10); // 10s TTL
+    res.status(200).json({ success: true, data });
   } catch (error) {
     next(error);
   }
