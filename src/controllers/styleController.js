@@ -72,10 +72,30 @@ exports.getStyles = async (req, res, next) => {
 };
 
 // Bump the live usage counter for a base style — called on each design create.
-// Ignores world/custom prompts and any id not in our displayed style set.
+// Ignores any id not in our displayed style set.
 exports.incrementStyleUsage = async (styleId) => {
   if (!styleId || !DESIGN_STYLES.some((s) => s.id === styleId)) return;
   await cache.zincrby(STYLE_USAGE_KEY, styleId, 1);
+};
+
+// Resolve which displayed style a generation should count toward and bump it.
+// Direct base-style picks count as-is; world/theme generations (style:'custom')
+// are matched to a base style by the style name/id appearing in the prompt
+// (e.g. "...Scandinavian-style kitchen..." → scandinavian), so the Most Used
+// list reflects ALL generation activity, not just the style-selection screen.
+exports.incrementStyleFromGeneration = async (styleId, customPrompt) => {
+  let id = null;
+  if (styleId && DESIGN_STYLES.some((s) => s.id === styleId)) {
+    id = styleId;
+  } else if (customPrompt) {
+    const p = String(customPrompt).toLowerCase();
+    const match = DESIGN_STYLES.find(
+      (s) => p.includes(s.id.toLowerCase()) || p.includes(s.name.toLowerCase()),
+    );
+    if (match) id = match.id;
+  }
+  if (!id) return;
+  await cache.zincrby(STYLE_USAGE_KEY, id, 1);
 };
 
 // Kept for callers that bust the legacy list cache (now a harmless no-op since

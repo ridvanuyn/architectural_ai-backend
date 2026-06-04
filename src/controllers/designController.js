@@ -187,7 +187,7 @@ exports.createDesign = async (req, res, next) => {
     });
 
     // Record this style usage in the live "Most Used Styles" counter (Redis).
-    styleController.incrementStyleUsage(style).catch(() => {});
+    styleController.incrementStyleFromGeneration(style, customPrompt).catch(() => {});
     // Drop the legacy popularity cache (harmless no-op now).
     styleController.invalidatePopularityCache().catch(() => {});
 
