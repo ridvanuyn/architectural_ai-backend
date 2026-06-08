@@ -5,6 +5,7 @@ const {
   getWorlds,
   getWorld,
   getFeaturedWorlds,
+  getQuickEdits,
   getWorldsByCategory,
   getCategories,
   searchWorlds,
@@ -15,6 +16,7 @@ const {
 router.get('/', publicCache(600), getWorlds);
 router.get('/search', publicCache(60), searchWorlds);
 router.get('/featured', publicCache(600), getFeaturedWorlds);
+router.get('/quick-edits', publicCache(600), getQuickEdits);
 router.get('/categories', getCategories);
 router.get('/tags', publicCache(1800), getTags);
 router.get('/category/:category', publicCache(600), getWorldsByCategory);

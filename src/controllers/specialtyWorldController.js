@@ -75,6 +75,7 @@ exports.getWorld = async (req, res, next) => {
       'category',
       'specialty',
       'tags',
+      'quick-edits',
     ]);
     if (RESERVED_SEGMENTS.has(req.params.id)) {
       return res.status(200).json({
@@ -120,6 +121,31 @@ exports.getFeaturedWorlds = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
+      data: worlds,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Get "quick edit" templates — preserve-intent tools that keep the
+//          room's existing design and apply a single change (Add Plants,
+//          Sunset, Change Wall Color, …). Drives the home "Quick Edits" rail.
+// @route   GET /api/worlds/quick-edits
+// @access  Public
+exports.getQuickEdits = async (req, res, next) => {
+  try {
+    const worlds = await cache.remember('worlds:quick-edits:v1', WORLDS_CACHE_TTL, async () => {
+      return SpecialtyWorld.find({
+        isActive: true,
+        designIntent: 'preserve',
+        id: { $regex: '^tool-' },
+      }).sort({ sortOrder: 1, name: 1 }).lean();
+    });
+
+    res.status(200).json({
+      success: true,
+      count: worlds.length,
       data: worlds,
     });
   } catch (error) {
