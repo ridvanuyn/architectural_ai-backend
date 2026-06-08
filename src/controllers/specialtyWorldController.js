@@ -157,7 +157,7 @@ exports.searchWorlds = async (req, res, next) => {
     const skip = (pageNum - 1) * limitNum;
     const trimmedQ = q.trim();
 
-    const projection = { name: 1, id: 1, description: 1, category: 1, imageUrl: 1, thumbnailUrl: 1, prompt: 1, price: 1, isProOnly: 1, isFeatured: 1, createdAt: 1 };
+    const projection = { name: 1, id: 1, description: 1, category: 1, imageUrl: 1, thumbnailUrl: 1, prompt: 1, designIntent: 1, price: 1, isProOnly: 1, isFeatured: 1, createdAt: 1 };
 
     const buildPayload = async () => {
       const query = { isActive: true };

@@ -14,6 +14,7 @@
 const { fal } = require('@fal-ai/client');
 const { DESIGN_STYLES } = require('../config/constants');
 const ApiKey = require('../models/ApiKey');
+const { resolveIntent, baseInstructionFor } = require('../utils/promptEnrichment');
 
 // --- Model tiers ---
 // Free:  SAM 3.1 image (cheap, fast)
@@ -183,15 +184,42 @@ const ROOM_PROMPTS = {
   other: 'interior space, well-designed room',
 };
 
-function generatePrompt(style, roomType, customPrompt = '') {
-  const stylePart = STYLE_PROMPTS[style] || STYLE_PROMPTS.modern;
-  const roomPart = ROOM_PROMPTS[roomType] || ROOM_PROMPTS.other;
+/**
+ * Build the final prompt sent to fal.ai.
+ *
+ * The base instruction is chosen from the template's design intent (see
+ * src/utils/promptEnrichment.js):
+ *   - 'transform' (themed worlds, full style packs, base styles): redesign the
+ *     room while preserving architecture — the historical behaviour.
+ *   - 'preserve'  (quick tools like Add Plants / Sunset, functional tweaks):
+ *     keep the existing design/furniture/layout and apply ONLY the described
+ *     change. For these we deliberately DROP the style/room boilerplate, which
+ *     would otherwise push a full restyle (and is what made "Add Plants" also
+ *     swap the sofa).
+ *
+ * @param {object} [opts]
+ * @param {'preserve'|'transform'} [opts.designIntent] - authoritative intent
+ *   (from the DB). When absent, intent is inferred from the prompt text.
+ */
+function generatePrompt(style, roomType, customPrompt = '', opts = {}) {
+  const intent = resolveIntent({ designIntent: opts.designIntent, customPrompt });
+  const base = baseInstructionFor(intent);
 
-  const base =
-    'Redesign this room while preserving the original architecture, windows, doors, walls, and camera angle. ' +
-    'Keep the same room layout and perspective, only change the furniture, materials, textures, decor, and lighting. ' +
-    'Produce a photorealistic high-resolution interior photograph.';
+  if (intent === 'preserve') {
+    // The customPrompt already fully describes the single change to apply.
+    return [base, customPrompt].filter(Boolean).join(' ');
+  }
 
+  // When a themed world/template supplies its own prompt, IT drives the styling
+  // — don't prepend the generic "modern" style + room boilerplate, which would
+  // dilute or conflict with the theme (e.g. "Modern sleek furniture" bleeding
+  // into a Jurassic Park lab). The boilerplate fallbacks only apply to a pure
+  // base-style generation (no customPrompt).
+  const stylePart = STYLE_PROMPTS[style] || (customPrompt ? '' : STYLE_PROMPTS.modern);
+  // roomType is a hardcoded default for themed worlds, so the generic room
+  // boilerplate ("comfortable seating area, coffee table") is just noise there
+  // — only add it for a pure base-style generation.
+  const roomPart = customPrompt ? '' : (ROOM_PROMPTS[roomType] || ROOM_PROMPTS.other);
   return [base, stylePart, roomPart, customPrompt].filter(Boolean).join('. ');
 }
 
@@ -240,6 +268,7 @@ async function transformImage(imageUrl, options = {}) {
     style = 'modern',
     roomType = 'living_room',
     customPrompt = '',
+    designIntent,
     isPremium,
   } = options;
 
@@ -250,7 +279,7 @@ async function transformImage(imageUrl, options = {}) {
   }
   const tierConfig = MODEL_TIERS[tier] || MODEL_TIERS.free;
 
-  const prompt = generatePrompt(style, roomType, customPrompt);
+  const prompt = generatePrompt(style, roomType, customPrompt, { designIntent });
 
   console.log(`🎨 fal.ai [${tierConfig.label}]: transforming with style "${style}"`);
   if (customPrompt) console.log(`✏️ Custom instructions: "${customPrompt}"`);
@@ -321,6 +350,7 @@ async function submitTransform(imageUrl, options = {}, webhookUrl) {
     style = 'modern',
     roomType = 'living_room',
     customPrompt = '',
+    designIntent,
     isPremium,
   } = options;
 
@@ -328,7 +358,7 @@ async function submitTransform(imageUrl, options = {}, webhookUrl) {
   if (!tier) tier = isPremium ? 'pro' : 'free';
   const tierConfig = MODEL_TIERS[tier] || MODEL_TIERS.free;
 
-  const prompt = generatePrompt(style, roomType, customPrompt);
+  const prompt = generatePrompt(style, roomType, customPrompt, { designIntent });
 
   console.log(`📨 fal.ai queue submit [${tierConfig.label}] style "${style}"${customPrompt ? ` | custom: "${customPrompt}"` : ''}`);
 

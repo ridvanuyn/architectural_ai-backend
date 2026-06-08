@@ -5,6 +5,7 @@ const pLimit = require('p-limit');
 const Design = require('../models/Design');
 const Transaction = require('../models/Transaction');
 const User = require('../models/User');
+const SpecialtyWorld = require('../models/SpecialtyWorld');
 const { DESIGN_STATUS, TOKENS_PER_DESIGN, DESIGN_STYLES } = require('../config/constants');
 const s3Service = require('../services/s3Service');
 const falService = require('../services/falService');
@@ -103,7 +104,8 @@ exports.getUploadUrl = async (req, res, next) => {
 // @access  Private
 exports.createDesign = async (req, res, next) => {
   try {
-    const { originalImageUrl, originalImageKey, style, roomType, title, customPrompt, isPremium, tier } = req.body;
+    const { originalImageUrl, originalImageKey, style, roomType, title, isPremium, tier, worldId } = req.body;
+    let { customPrompt } = req.body;
 
     // Validate required fields
     if (!originalImageUrl) {
@@ -112,6 +114,22 @@ exports.createDesign = async (req, res, next) => {
         message: 'Original image URL is required',
       });
     }
+
+    // When a specialty world/template is selected the client sends its `worldId`.
+    // The prompt AND the design intent are the DB's source of truth — look them
+    // up here rather than trusting (or even needing) the client-sent prompt.
+    // designIntent drives prompt enrichment (preserve vs transform) downstream.
+    let designIntent;
+    if (worldId) {
+      const world = await SpecialtyWorld.findOne({ id: worldId }).select('prompt designIntent').lean();
+      if (world) {
+        if (world.prompt) customPrompt = world.prompt;
+        designIntent = world.designIntent;
+      }
+    }
+    // Fallback for older clients / free-form prompts: infer intent from the
+    // prompt text (handled inside falService.generatePrompt when designIntent
+    // is undefined).
 
     // Need either style or customPrompt
     if (!style && !customPrompt) {
@@ -177,6 +195,7 @@ exports.createDesign = async (req, res, next) => {
       style,
       roomType,
       customPrompt,
+      designIntent,
       tier: tier || (isPremium ? 'pro' : 'free'),
       userId: req.user.id,
     });
@@ -240,7 +259,7 @@ function processDesignWithAI(designId, imageUrl, options) {
  * 10–40s generation, so the box can hold far more in-flight generations.
  */
 async function submitDesignToFal(designId, imageUrl, options, webhookUrl) {
-  const { style, roomType, customPrompt, tier } = options;
+  const { style, roomType, customPrompt, designIntent, tier } = options;
 
   return aiLimit(async () => {
     try {
@@ -248,7 +267,7 @@ async function submitDesignToFal(designId, imageUrl, options, webhookUrl) {
 
       const { requestId, model, prompt } = await falService.submitTransform(
         imageUrl,
-        { style, roomType, customPrompt, tier },
+        { style, roomType, customPrompt, designIntent, tier },
         webhookUrl,
       );
 
@@ -286,7 +305,7 @@ async function submitDesignToFal(designId, imageUrl, options, webhookUrl) {
  * simulator) kullanılır; canlıda async queue + webhook tercih edilir.
  */
 async function processDesignBlocking(designId, imageUrl, options) {
-  const { style, roomType, customPrompt, tier, userId } = options;
+  const { style, roomType, customPrompt, designIntent, tier, userId } = options;
 
   return aiLimit(async () => {
     try {
@@ -297,6 +316,7 @@ async function processDesignBlocking(designId, imageUrl, options) {
         style,
         roomType,
         customPrompt,
+        designIntent,
         tier,
       });
 

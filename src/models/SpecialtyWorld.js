@@ -39,6 +39,18 @@ const specialtyWorldSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  // How this template should treat the user's existing room when generating:
+  //   'transform' → fully redesign / restyle the room into the template's theme
+  //                 (themed worlds, full style packs, room sections).
+  //   'preserve'  → keep the room's existing design, furniture, layout and style
+  //                 exactly as-is and apply ONLY the single described change
+  //                 (quick tools like Add Plants / Sunset, functional tweaks).
+  // Drives prompt enrichment in falService.generatePrompt — see promptEnrichment.js.
+  designIntent: {
+    type: String,
+    enum: ['transform', 'preserve'],
+    default: 'transform',
+  },
   price: {
     type: Number,
     default: 0.99,
